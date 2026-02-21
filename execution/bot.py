@@ -7,7 +7,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 import ccxt.async_support as ccxt
 from dotenv import load_dotenv
 
-from state_manager import load_state, save_state
+from state_manager import load_state, save_state, log_trade
 from scanner import scan_market
 
 load_dotenv()  # Load environment variables from .env file
@@ -41,12 +41,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
     balance = state.get("portfolio_balance", 0.0)
+    available_cash = state.get("available_cash", balance)
+    tied_capital = state.get("tied_capital", 0.0)
     positions = state.get("active_positions", [])
     
+    msg = f"Total Equity: ${balance:.2f}\n"
+    msg += f"Available Cash: ${available_cash:.2f}\n"
+    msg += f"Tied in Assets: ${tied_capital:.2f}\n"
+    
     if not positions:
-        msg = f"Balance: ${balance:.2f}\nNo active positions."
+        msg += "\nNo active positions."
     else:
-        msg = f"Balance: ${balance:.2f}\nActive Positions:\n"
+        msg += "\nActive Positions:\n"
         for p in positions:
             msg += f"- {p['symbol']} ({p.get('side', 'LONG')}): Entry ${p['entry_price']:.4f} | SL ${p['current_sl']:.4f}\n"
     await update.message.reply_text(msg)
@@ -125,7 +131,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ticker = await exchange.fetch_ticker(symbol)
             price = ticker['last']
             balance = state.get("portfolio_balance", 25000.0)
+            available_cash = state.get("available_cash", balance)
             allocated_capital = balance / 20.0
+            
+            if available_cash < allocated_capital:
+                await query.edit_message_text(f"Cannot open {symbol}: Not enough available cash (${available_cash:.2f}).")
+                return
+                
+            state["available_cash"] = available_cash - allocated_capital
+            state["tied_capital"] = state.get("tied_capital", 0.0) + allocated_capital
             
             if side == "LONG":
                 sl = price * 0.96
@@ -144,6 +158,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             })
             state["active_positions"] = positions
             save_state(state)
+            
+            log_trade("OPEN", symbol, side, price, sl, datetime.now(timezone.utc).timestamp())
             
             await query.edit_message_text(f"✅ Opened {side} on {symbol} at ${price:.4f}. Initial SL set to ${sl:.4f}")
             
@@ -170,6 +186,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     pnl = alloc * (net_pct / 100)
                     state['portfolio_balance'] = state.get('portfolio_balance', 25000.0) + pnl
+                    state['available_cash'] = state.get('available_cash', 25000.0) + alloc + pnl
+                    state['tied_capital'] = max(0.0, state.get('tied_capital', 0.0) - alloc)
+                    
+                    log_trade("CLOSE", symbol, pos_side, entry, sl, datetime.now(timezone.utc).timestamp(), pnl)
                 else:
                     kept_positions.append(p)
                     

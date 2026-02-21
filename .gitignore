@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 .DS_Store
 venv/
+state.json
+trade_log.json
