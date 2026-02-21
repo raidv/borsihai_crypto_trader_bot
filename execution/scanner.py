@@ -101,6 +101,7 @@ async def scan_market():
     
     try:
         btc_pct = await get_btc_pct_change(exchange)
+        logger.info(f"Analyzing {len(symbols)} pairs for 15m exact crosses...")
         tasks = [check_pair_15m(exchange, symbol) for symbol in symbols]
         results = await asyncio.gather(*tasks)
         
@@ -120,6 +121,8 @@ async def scan_market():
                     
         # Sort by score desc, then market cap rank (lower index = better MC)
         signals.sort(key=lambda x: (-x['score'], x['mc_rank']))
+        
+        logger.info(f"Scan complete. Found {len(signals)} signals matching 15m + 1h confluence.")
         return signals[:10]
         
     finally:

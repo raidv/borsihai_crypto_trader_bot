@@ -13,6 +13,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Bot")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+DEBUG_RUN_IMMEDIATELY = False  # Set to False to disable the automatic run on startup
+
+_has_run_once = False
+
 # Note: You need to set TELEGRAM_TOKEN locally or in .env
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -75,6 +79,20 @@ async def afk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
     finally:
         await exchange.close()
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "🦈 *Börsihai 2026 Crypto Assistant*\n\n"
+        "I am an algorithmic momentum bot tracking 100 Binance coins against USDT. "
+        "I hunt for 15m EMA 20/50 crosses with RSI and 1h confluence.\n\n"
+        "**Available Commands:**\n"
+        "• `/status` - Check portfolio balance, floating P/L, and active trades.\n"
+        "• `/afk` - Pause scanning signals and see hard TP/SL to enter into StockTrak for safety overnight.\n"
+        "• `/ready` - Leave AFK mode and resume hunting for signals.\n"
+        "• `/start` - Explicitly forces the 15m monitoring loop to register (you don't need to press this again after restarting).\n"
+        "• `/help` - What you're looking at right now."
+    )
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def ready(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
@@ -196,9 +214,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await exchange.close()
 
 async def market_monitor(context: ContextTypes.DEFAULT_TYPE):
+    global _has_run_once
     now = datetime.now(timezone.utc)
+    
+    force_run = False
+    if DEBUG_RUN_IMMEDIATELY and not _has_run_once:
+        force_run = True
+        _has_run_once = True
+        logger.info("Forcing initial debug market scan...")
+        
     # Runs every 1 min. Only execute exact logic on intervals of 15 min + 1 min (01, 16, 31, 46)
-    if now.minute % 15 != 1:
+    if not force_run and now.minute % 15 != 1:
         return
         
     logger.info(f"Running 15m cycle at {now.strftime('%H:%M:%S')}")
@@ -371,6 +397,7 @@ def main():
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("afk", afk))
     application.add_handler(CommandHandler("ready", ready))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
     logger.info("Starting bot...")
