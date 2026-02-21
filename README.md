@@ -32,10 +32,19 @@ chmod +x setup.sh
 
 ## How to Run
 
-1. **Export your Token**: Ensure your Telegram bot token is stored to an environment variable in your terminal:
+1. **Configure Token**: You have two options to provide your Telegram bot token:
+   
+   **Option A (Recommended)**: Copy the `.env.example` file to `.env` and paste your token inside it:
+   ```bash
+   cp .env.example .env
+   # Then edit .env and replace YOUR_BOT_TOKEN_FROM_BOTFATHER with your actual token
+   ```
+
+   **Option B (Terminal)**: Export the token directly to an environment variable in your terminal:
    ```bash
    export TELEGRAM_TOKEN='YOUR_BOT_TOKEN_FROM_BOTFATHER'
    ```
+
 2. **Launch the Bot**:
    ```bash
    ./run.sh

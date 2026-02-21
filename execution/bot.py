@@ -5,11 +5,17 @@ from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import ccxt.async_support as ccxt
+from dotenv import load_dotenv
 
 from state_manager import load_state, save_state
 from scanner import scan_market
 
+load_dotenv()  # Load environment variables from .env file
+
 logging.basicConfig(level=logging.INFO)
+# Silence httpx logs to prevent HTTP Request URIs (which contain the token) from printing
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 logger = logging.getLogger("Bot")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
