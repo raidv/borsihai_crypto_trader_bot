@@ -272,7 +272,10 @@ async def market_monitor(context: ContextTypes.DEFAULT_TYPE):
                  InlineKeyboardButton("❌ Ignore", callback_data=f"ignore_{symbol}")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            text = f"🚨 **{side} Signal** 🚨\nSymbol: {symbol}\nScore: {score*100:.2f}%\nPrice: ${price:.4f}"
+            
+            initial_sl = price * 0.96 if side == "LONG" else price * 1.04
+            
+            text = f"🚨 **{side} Signal** 🚨\nSymbol: {symbol}\nScore: {score*100:.2f}%\nEntry Price: ${price:.4f}\nInitial SL: ${initial_sl:.4f}"
             await context.bot.send_message(chat_id=context.job.chat_id, text=text, reply_markup=reply_markup)
             
     # 2. Check active positions
