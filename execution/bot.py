@@ -274,8 +274,10 @@ async def market_monitor(context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             initial_sl = price * 0.96 if side == "LONG" else price * 1.04
+            balance = state.get("portfolio_balance", 25000.0)
+            order_size = balance / 20.0
             
-            text = f"🚨 **{side} Signal** 🚨\nSymbol: {symbol}\nScore: {score*100:.2f}%\nEntry Price: ${price:.4f}\nInitial SL: ${initial_sl:.4f}"
+            text = f"🚨 **{side} Signal** 🚨\nSymbol: {symbol}\nScore: {score*100:.2f}%\nEntry Price: ${price:.4f}\nInitial SL: ${initial_sl:.4f}\nOrder Size: ${order_size:.2f}"
             await context.bot.send_message(chat_id=context.job.chat_id, text=text, reply_markup=reply_markup)
             
     # 2. Check active positions
