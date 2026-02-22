@@ -21,11 +21,16 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("Bot")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-DEBUG_RUN_IMMEDIATELY = False  # Set to False to disable the automatic run on startup
+DEBUG_RUN_IMMEDIATELY = False  # Set to True to force an immediate scan on startup
+
+MAX_POSITIONS = 10
+POSITION_SIZE_PCT = 0.10  # 10% of portfolio per position
+ATR_MULTIPLIER = 2.0      # SL = Entry +/- (ATR * 2.0)
+TP1_RR_RATIO = 1.5        # TP1 at 1.5x risk
 
 _has_run_once = False
 
-# Note: You need to set TELEGRAM_TOKEN locally or in .env
+# ─── COMMAND HANDLERS ──────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -38,7 +43,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job.schedule_removal()
         
     context.job_queue.run_repeating(market_monitor, interval=60, first=0, chat_id=chat_id, name="market_monitor")
-    await update.message.reply_text("Börsihai 2026 Crypto Assistant is online. Monitoring job registered.")
+    await update.message.reply_text("🦈 Börsihai 2026 Swing Assistant is online. Monitoring 1H/4H strategy.")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
@@ -47,16 +52,21 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tied_capital = state.get("tied_capital", 0.0)
     positions = state.get("active_positions", [])
     
-    msg = f"Total Equity: ${balance:.2f}\n"
+    msg = f"📊 **Portfolio Status**\n"
+    msg += f"Total Equity: ${balance:.2f}\n"
     msg += f"Available Cash: ${available_cash:.2f}\n"
     msg += f"Tied in Assets: ${tied_capital:.2f}\n"
+    msg += f"Open Positions: {len(positions)}/{MAX_POSITIONS}\n"
     
     if not positions:
         msg += "\nNo active positions."
     else:
-        msg += "\nActive Positions:\n"
+        msg += "\n**Active Positions:**\n"
         for p in positions:
-            msg += f"- {p['symbol']} ({p.get('side', 'LONG')}): Entry ${p['entry_price']:.4f} | SL ${p['current_sl']:.4f}\n"
+            tp1_status = "✅ Hit" if p.get('tp1_hit', False) else "⏳ Pending"
+            msg += f"- {p['symbol']} ({p.get('side', 'LONG')})\n"
+            msg += f"  Entry: ${p['entry_price']:.4f} | SL: ${p['current_sl']:.4f}\n"
+            msg += f"  TP1: ${p.get('tp1_price', 0):.4f} [{tp1_status}]\n"
     await update.message.reply_text(msg)
 
 async def afk(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -66,28 +76,31 @@ async def afk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     positions = state.get("active_positions", [])
     if not positions:
         save_state(state)
-        await update.message.reply_text("Bot is now AFK. No incoming signals.")
+        await update.message.reply_text("😴 Bot is now AFK. No incoming signals.")
         return
         
     exchange = ccxt.binance()
     try:
         symbols = [p['symbol'] for p in positions]
         tickers = await exchange.fetch_tickers(symbols)
-        msg = "AFK Mode Active. Signals paused.\n\nUpdate StockTrak with these safety levels:\n"
+        msg = "😴 **AFK Mode Active.** Signals paused.\n\nUpdate StockTrak with these safety levels:\n"
         
         for p in positions:
             ticker = tickers.get(p['symbol'])
             if not ticker: continue
             curr_price = ticker['last']
             
-            # AFK TP is +10% from CURRENT price
+            # Safety SL: 4% away from current market price
             if p.get('side', 'LONG') == 'LONG':
+                afk_sl = curr_price * 0.96
                 afk_tp = curr_price * 1.10
             else:
+                afk_sl = curr_price * 1.04
                 afk_tp = curr_price * 0.90
                 
-            p['afk_tp'] = afk_tp
-            msg += f"- {p['symbol']}: SL = ${p['current_sl']:.4f} | TP = ${afk_tp:.4f}\n"
+            msg += f"\n- **{p['symbol']}** ({p.get('side', 'LONG')}):\n"
+            msg += f"  Safety SL: ${afk_sl:.4f}\n"
+            msg += f"  Moon-shot TP: ${afk_tp:.4f}\n"
             
         save_state(state)
         await update.message.reply_text(msg)
@@ -96,15 +109,20 @@ async def afk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "🦈 *Börsihai 2026 Crypto Assistant*\n\n"
-        "I am an algorithmic momentum bot tracking 100 Binance coins against USDT. "
-        "I hunt for 15m EMA 20/50 crosses with RSI and 1h confluence.\n\n"
+        "🦈 *Börsihai 2026 Swing Assistant*\n\n"
+        "I am a 1H/4H swing trading bot tracking Binance coins against USDT. "
+        "I use 4H EMA 200 for trend direction, 1H EMA 20/50 + MACD for entries, "
+        "and ATR-based dynamic risk management.\n\n"
+        "**Notification Hierarchy:**\n"
+        "🚨 ACTION REQUIRED — Entries and full closures\n"
+        "⚡ UPDATE — Partial TP1 hits and SL moves\n"
+        "ℹ️ INFO — Status and heartbeat\n\n"
         "**Available Commands:**\n"
-        "• `/status` - Check portfolio balance, floating P/L, and active trades.\n"
-        "• `/afk` - Pause scanning signals and see hard TP/SL to enter into StockTrak for safety overnight.\n"
-        "• `/ready` - Leave AFK mode and resume hunting for signals.\n"
-        "• `/start` - Explicitly forces the 15m monitoring loop to register (you don't need to press this again after restarting).\n"
-        "• `/help` - What you're looking at right now."
+        "• `/status` - Portfolio overview with TP1 status per position\n"
+        "• `/afk` - Pause signals, get safety SL (4%) and TP (10%) levels\n"
+        "• `/ready` - Resume signal scanning\n"
+        "• `/start` - Re-register the monitoring loop\n"
+        "• `/help` - This message"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -112,7 +130,9 @@ async def ready(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
     state["bot_status"] = "ready"
     save_state(state)
-    await update.message.reply_text("Bot is Ready. Tracking signals.")
+    await update.message.reply_text("✅ Bot is Ready. Hunting for 1H/4H swing signals.")
+
+# ─── BUTTON HANDLERS ──────────────────────────────────────────────────
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -122,19 +142,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         if data.startswith("open_"):
-            # Format: open_LONG_BTC/USDT
-            _, side, symbol = data.split("_", 2)
+            # Format: open_LONG_BTC/USDT_ATR
+            parts = data.split("_", 3)
+            side = parts[1]
+            symbol = parts[2]
+            atr_val = float(parts[3]) if len(parts) > 3 else 0.0
+            
             positions = state.get("active_positions", [])
             
-            if len(positions) >= 20:
-                await query.edit_message_text(f"Cannot open {symbol}: Max 20 positions reached.")
+            if len(positions) >= MAX_POSITIONS:
+                await query.edit_message_text(f"Cannot open {symbol}: Max {MAX_POSITIONS} positions reached.")
                 return
                 
             ticker = await exchange.fetch_ticker(symbol)
             price = ticker['last']
             balance = state.get("portfolio_balance", 25000.0)
             available_cash = state.get("available_cash", balance)
-            allocated_capital = balance / 20.0
+            allocated_capital = balance * POSITION_SIZE_PCT
             
             if available_cash < allocated_capital:
                 await query.edit_message_text(f"Cannot open {symbol}: Not enough available cash (${available_cash:.2f}).")
@@ -143,19 +167,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             state["available_cash"] = available_cash - allocated_capital
             state["tied_capital"] = state.get("tied_capital", 0.0) + allocated_capital
             
+            # ATR-based SL
+            initial_risk = ATR_MULTIPLIER * atr_val if atr_val > 0 else price * 0.04
             if side == "LONG":
-                sl = price * 0.96
+                sl = price - initial_risk
+                tp1 = price + (initial_risk * TP1_RR_RATIO)
             else:
-                sl = price * 1.04
+                sl = price + initial_risk
+                tp1 = price - (initial_risk * TP1_RR_RATIO)
                 
             positions.append({
                 "symbol": symbol,
                 "side": side,
                 "entry_price": price,
                 "allocated_capital": allocated_capital,
+                "initial_risk": initial_risk,
                 "current_sl": sl,
+                "tp1_price": tp1,
+                "tp1_hit": False,
                 "timestamp": datetime.now(timezone.utc).timestamp(),
-                "highest_profit_pct": 0.0,
                 "denial_count": 0
             })
             state["active_positions"] = positions
@@ -163,7 +193,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             log_trade("OPEN", symbol, side, price, sl, datetime.now(timezone.utc).timestamp())
             
-            await query.edit_message_text(f"✅ Opened {side} on {symbol} at ${price:.4f}. Initial SL set to ${sl:.4f}")
+            await query.edit_message_text(
+                f"✅ Opened {side} on {symbol}\n"
+                f"Entry: ${price:.4f}\n"
+                f"SL: ${sl:.4f}\n"
+                f"TP1: ${tp1:.4f}\n"
+                f"Size: ${allocated_capital:.2f}"
+            )
             
         elif data.startswith("ignore_"):
             await query.edit_message_text("❌ Ignored signal.")
@@ -179,7 +215,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     entry = p['entry_price']
                     sl = p['current_sl']
                     pos_side = p.get('side', 'LONG')
-                    alloc = p.get('allocated_capital', state.get('portfolio_balance', 25000.0) / 20)
+                    alloc = p.get('allocated_capital', state.get('portfolio_balance', 25000.0) * POSITION_SIZE_PCT)
                     
                     if pos_side == "LONG":
                         net_pct = (sl - entry) / entry * 100 - 0.2
@@ -207,39 +243,56 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     p['denial_count'] = p.get('denial_count', 0) + 1
             state["active_positions"] = positions
             save_state(state)
-            await query.edit_message_text(f"❌ Denied SL closure for {symbol}. Will repoll later if breached.")
+            await query.edit_message_text(f"❌ Denied closure for {symbol}. Will re-check on next candle.")
             
-        elif data.startswith("trail_"):
-            # Format: trail_LONG_BTC/USDT_1.5
-            parts = data.split("_", 3)
-            side = parts[1]
-            symbol = parts[2]
-            new_sl_pct = float(parts[3])
-            
+        elif data.startswith("halfclose_"):
+            # Format: halfclose_BTC/USDT
+            _, symbol = data.split("_", 1)
             positions = state.get("active_positions", [])
+            
             for p in positions:
-                if p['symbol'] == symbol:
+                if p['symbol'] == symbol and not p.get('tp1_hit', False):
+                    p['tp1_hit'] = True
                     entry = p['entry_price']
+                    side = p.get('side', 'LONG')
+                    alloc = p.get('allocated_capital', 0)
+                    half_alloc = alloc / 2.0
+                    
+                    # Calculate PnL on the closed half
+                    tp1 = p.get('tp1_price', entry)
                     if side == "LONG":
-                        new_target = entry * (1 + new_sl_pct/100)
-                        if new_target > p['current_sl']:
-                            p['current_sl'] = new_target
+                        net_pct = (tp1 - entry) / entry * 100 - 0.2
+                        be_sl = entry * 1.002  # Break-even + fees
                     else:
-                        new_target = entry * (1 - new_sl_pct/100)
-                        if new_target < p['current_sl'] or p['current_sl'] == 0:
-                            p['current_sl'] = new_target
-                            
+                        net_pct = (entry - tp1) / entry * 100 - 0.2
+                        be_sl = entry * 0.998
+                    
+                    pnl = half_alloc * (net_pct / 100)
+                    
+                    # Update portfolio: release half the capital + profit
+                    state['portfolio_balance'] = state.get('portfolio_balance', 25000.0) + pnl
+                    state['available_cash'] = state.get('available_cash', 0) + half_alloc + pnl
+                    state['tied_capital'] = max(0.0, state.get('tied_capital', 0.0) - half_alloc)
+                    
+                    # Halve remaining allocation and move SL to break-even
+                    p['allocated_capital'] = half_alloc
+                    p['current_sl'] = be_sl
+                    
+                    log_trade("PARTIAL_CLOSE", symbol, side, entry, tp1, datetime.now(timezone.utc).timestamp(), pnl)
+                    
             state["active_positions"] = positions
             save_state(state)
-            await query.edit_message_text(f"✅ Trailing SL applied for {symbol} at net +{new_sl_pct}%")
-            
-        elif data.startswith("trailignore_"):
-            await query.edit_message_text("❌ Ignored trailing SL suggestion.")
+            await query.edit_message_text(
+                f"⚡ TP1 half-close confirmed for {symbol}.\n"
+                f"SL moved to break-even. Remaining 50% is running."
+            )
 
     except Exception as e:
         logger.error(f"Error handling button: {e}")
     finally:
         await exchange.close()
+
+# ─── MARKET MONITOR ───────────────────────────────────────────────────
 
 async def market_monitor(context: ContextTypes.DEFAULT_TYPE):
     global _has_run_once
@@ -251,60 +304,76 @@ async def market_monitor(context: ContextTypes.DEFAULT_TYPE):
         _has_run_once = True
         logger.info("Forcing initial debug market scan...")
         
-    # Runs every 1 min. Only execute exact logic on intervals of 15 min + 1 min (01, 16, 31, 46)
+    # Runs every 1 min. Execute on 15m intervals (01, 16, 31, 46)
     if not force_run and now.minute % 15 != 1:
         return
         
-    logger.info(f"Running 15m cycle at {now.strftime('%H:%M:%S')}")
+    logger.info(f"Running 15m monitoring cycle at {now.strftime('%H:%M:%S')}")
     state = load_state()
     
-    # 1. Scanner for new signals
+    # ─── 1. Scanner for new entry signals ──────────────────────────
     if state.get("bot_status") == "ready":
         signals = await scan_market()
         for sig in signals:
             symbol = sig['symbol']
             side = sig['signal']
-            score = sig['score']
+            score = sig.get('score', 0)
             price = sig['price']
+            atr_val = sig.get('atr', 0)
             
+            # Calculate preview levels
+            initial_risk = ATR_MULTIPLIER * atr_val if atr_val > 0 else price * 0.04
+            if side == "LONG":
+                preview_sl = price - initial_risk
+                preview_tp1 = price + (initial_risk * TP1_RR_RATIO)
+            else:
+                preview_sl = price + initial_risk
+                preview_tp1 = price - (initial_risk * TP1_RR_RATIO)
+            
+            balance = state.get("portfolio_balance", 25000.0)
+            order_size = balance * POSITION_SIZE_PCT
+            
+            # Pass ATR in callback data so open handler can use it
             keyboard = [
-                [InlineKeyboardButton("✅ Opened", callback_data=f"open_{side}_{symbol}"),
+                [InlineKeyboardButton("✅ Opened", callback_data=f"open_{side}_{symbol}_{atr_val:.4f}"),
                  InlineKeyboardButton("❌ Ignore", callback_data=f"ignore_{symbol}")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            initial_sl = price * 0.96 if side == "LONG" else price * 1.04
-            balance = state.get("portfolio_balance", 25000.0)
-            order_size = balance / 20.0
-            
-            text = f"🚨 **{side} Signal** 🚨\nSymbol: {symbol}\nScore: {score*100:.2f}%\nEntry Price: ${price:.4f}\nInitial SL: ${initial_sl:.4f}\nOrder Size: ${order_size:.2f}"
+            text = (
+                f"🚨 **ACTION REQUIRED: {side} Signal** 🚨\n"
+                f"Symbol: {symbol}\n"
+                f"Score vs BTC: {score*100:.2f}%\n"
+                f"Entry Price: ${price:.4f}\n"
+                f"Stop Loss: ${preview_sl:.4f}\n"
+                f"TP1 (1.5R): ${preview_tp1:.4f}\n"
+                f"Order Size: ${order_size:.2f}"
+            )
             await context.bot.send_message(chat_id=context.job.chat_id, text=text, reply_markup=reply_markup)
             
-    # 2. Check active positions
+    # ─── 2. Monitor active positions ───────────────────────────────
     positions = state.get("active_positions", [])
     if not positions:
         return
         
     exchange = ccxt.binance()
     try:
-        symbols = [p['symbol'] for p in positions]
+        symbols = list(set(p['symbol'] for p in positions))
         
-        # Parallel fetch 15m candles to check SL breach accurately + Early Exit Logic
-        async def fetch_and_calc_indicators(sym):
+        # Fetch 1H candles for SL breach check + MACD early exit
+        async def fetch_1h_data(sym):
             try:
-                ohlcv = await exchange.fetch_ohlcv(sym, "15m", limit=50) # Need 50 for EMA50
-                if ohlcv and len(ohlcv) >= 50:
+                ohlcv = await exchange.fetch_ohlcv(sym, "1h", limit=50)
+                if ohlcv and len(ohlcv) >= 30:
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df.ta.ema(length=20, append=True)
-                    df.ta.ema(length=50, append=True)
-                    df.ta.rsi(length=14, append=True)
+                    df.ta.macd(fast=12, slow=26, signal=9, append=True)
                     return sym, df
                 return sym, None
             except Exception as e:
-                logger.error(f"Error fetching exit data for {sym}: {e}")
+                logger.error(f"Error fetching monitor data for {sym}: {e}")
                 return sym, None
                 
-        tasks = [fetch_and_calc_indicators(sym) for sym in symbols]
+        tasks = [fetch_1h_data(sym) for sym in symbols]
         results = await asyncio.gather(*tasks)
         candles_dfs = {sym: df for sym, df in results if df is not None}
         
@@ -315,6 +384,8 @@ async def market_monitor(context: ContextTypes.DEFAULT_TYPE):
             side = p.get('side', 'LONG')
             entry = p['entry_price']
             sl = p['current_sl']
+            tp1 = p.get('tp1_price', 0)
+            tp1_hit = p.get('tp1_hit', False)
             denial_count = p.get('denial_count', 0)
             
             ticker = tickers.get(symbol)
@@ -322,13 +393,12 @@ async def market_monitor(context: ContextTypes.DEFAULT_TYPE):
             
             current_price = ticker['last']
             
-            # SL Breach Check & Early Warning Check
+            # ── SL Breach Check ──
             breached = False
-            early_exit_warning = None
+            macd_exit_warning = None
             
             if symbol in candles_dfs:
                 df = candles_dfs[symbol]
-                # High/Low logic for the last closed candle (-2) to check SL
                 c_low = df['low'].iloc[-2]
                 c_high = df['high'].iloc[-2]
                 
@@ -337,23 +407,27 @@ async def market_monitor(context: ContextTypes.DEFAULT_TYPE):
                 elif side == "SHORT" and c_high >= sl:
                     breached = True
                     
-                # Early Exit Check (Trend Reversal or Momentum Death)
-                ema20_curr = df['EMA_20'].iloc[-2]
-                ema50_curr = df['EMA_50'].iloc[-2]
-                rsi_curr = df['RSI_14'].iloc[-2]
+                # ── MACD Early Exit Check ──
+                macd_line = df.get('MACD_12_26_9')
+                macd_signal_line = df.get('MACDs_12_26_9')
                 
-                if side == "LONG":
-                    if ema20_curr < ema50_curr:
-                        early_exit_warning = "Trend Reversal (EMA 20 < EMA 50)"
-                    elif rsi_curr < 45:
-                        early_exit_warning = "Momentum Death (RSI < 45)"
-                elif side == "SHORT":
-                    if ema20_curr > ema50_curr:
-                        early_exit_warning = "Trend Reversal (EMA 20 > EMA 50)"
-                    elif rsi_curr > 55:
-                        early_exit_warning = "Momentum Death (RSI > 55)"
+                if macd_line is not None and macd_signal_line is not None:
+                    ml_curr = macd_line.iloc[-2]
+                    ms_curr = macd_signal_line.iloc[-2]
+                    ml_prev = macd_line.iloc[-3]
+                    ms_prev = macd_signal_line.iloc[-3]
+                    
+                    if not any(pd.isna(x) for x in [ml_curr, ms_curr, ml_prev, ms_prev]):
+                        if side == "LONG":
+                            # MACD crosses below signal = bearish reversal
+                            if ml_prev >= ms_prev and ml_curr < ms_curr:
+                                macd_exit_warning = "MACD bearish cross on 1H"
+                        elif side == "SHORT":
+                            # MACD crosses above signal = bullish reversal
+                            if ml_prev <= ms_prev and ml_curr > ms_curr:
+                                macd_exit_warning = "MACD bullish cross on 1H"
             
-            # Fallback current price check for strict SL
+            # Fallback current price check
             if not breached:
                 if side == "LONG" and current_price <= sl: breached = True
                 elif side == "SHORT" and current_price >= sl: breached = True
@@ -367,13 +441,38 @@ async def market_monitor(context: ContextTypes.DEFAULT_TYPE):
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     await context.bot.send_message(
                         chat_id=context.job.chat_id,
-                        text=f"⚠️ SL Breach detected for {symbol} at ${sl:.4f}. Did you close it in StockTrak?",
+                        text=f"🚨 **ACTION REQUIRED: SL Breach** for {symbol} at ${sl:.4f}. Did you close it in StockTrak?",
                         reply_markup=reply_markup
                     )
-                continue # Skip trailing calculations if breached
+                continue
                 
-            if early_exit_warning and denial_count < 2:
-                # Ask user if they want to exit early
+            # ── TP1 Check ──
+            if not tp1_hit and tp1 > 0:
+                tp1_reached = False
+                if side == "LONG" and current_price >= tp1:
+                    tp1_reached = True
+                elif side == "SHORT" and current_price <= tp1:
+                    tp1_reached = True
+                    
+                if tp1_reached:
+                    keyboard = [
+                        [InlineKeyboardButton("✅ Half-Closed", callback_data=f"halfclose_{symbol}"),
+                         InlineKeyboardButton("❌ Ignore", callback_data=f"slopen_{symbol}")]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await context.bot.send_message(
+                        chat_id=context.job.chat_id,
+                        text=(
+                            f"⚡ **UPDATE: TP1 Hit** for {symbol}!\n"
+                            f"Close 50% of your position now.\n"
+                            f"SL will move to break-even after confirmation."
+                        ),
+                        reply_markup=reply_markup
+                    )
+                    continue
+            
+            # ── MACD Early Exit Warning ──
+            if macd_exit_warning and denial_count < 2:
                 keyboard = [
                     [InlineKeyboardButton("✅ Closed", callback_data=f"slclosed_{symbol}"),
                      InlineKeyboardButton("❌ Ignore", callback_data=f"slopen_{symbol}")]
@@ -381,69 +480,18 @@ async def market_monitor(context: ContextTypes.DEFAULT_TYPE):
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await context.bot.send_message(
                     chat_id=context.job.chat_id,
-                    text=f"⚠️ Early Exit Warning for {symbol}! Reason: {early_exit_warning}. Close position?",
+                    text=f"🚨 **ACTION REQUIRED: Early Exit** for {symbol}!\nReason: {macd_exit_warning}.\nClose position?",
                     reply_markup=reply_markup
                 )
-                # We do not `continue` here because it's just a warning, we still want to trail stops if possible.
             
-            # Trailing Stop Calculation
-            # Calculate net profit (deducting 0.2% fee)
-            if side == "LONG":
-                gross_pct = (current_price - entry) / entry * 100
-            else:
-                gross_pct = (entry - current_price) / entry * 100
-                
-            net_pct = gross_pct - 0.2
-            max_profit = max(p.get('highest_profit_pct', 0), net_pct)
-            p['highest_profit_pct'] = max_profit
-            
-            # Reset denial count if price recovered above SL
+            # Reset denial count if price recovered
             p['denial_count'] = 0
-            
-            # Trailing Logic
-            suggestion = None
-            suggested_pct = None
-            
-            if max_profit >= 3.0:
-                # Break-even is +0.2% to cover fees, or literally +0.2% of entry
-                # The rule: SL to Entry * 1.002
-                expected_sl_pct = 0.2
-                
-                if max_profit >= 6.0:
-                    # Next trail at +6% profit -> SL to +3%
-                    # Continuous: every further 3% gain -> SL up by 2.5%
-                    steps = int((max_profit - 6.0) // 3.0)
-                    if steps < 0:
-                        expected_sl_pct = 3.0
-                    else:
-                        expected_sl_pct = 3.0 + (steps + 1) * 2.5
-                
-                if side == "LONG":
-                    suggested_sl_price = entry * (1 + expected_sl_pct / 100)
-                    if suggested_sl_price > sl: # Better than current
-                        suggestion = suggested_sl_price
-                        suggested_pct = expected_sl_pct
-                else:
-                    suggested_sl_price = entry * (1 - expected_sl_pct / 100)
-                    if suggested_sl_price < sl or sl == 0:
-                        suggestion = suggested_sl_price
-                        suggested_pct = expected_sl_pct
-                        
-            if suggestion:
-                keyboard = [
-                    [InlineKeyboardButton("✅ Applied", callback_data=f"trail_{side}_{symbol}_{suggested_pct}"),
-                     InlineKeyboardButton("❌ Ignore", callback_data=f"trailignore_{symbol}")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await context.bot.send_message(
-                    chat_id=context.job.chat_id,
-                    text=f"📈 {symbol} is up net +{net_pct:.2f}%. Move SL to +{suggested_pct}% (${suggestion:.4f})?",
-                    reply_markup=reply_markup
-                )
                 
         save_state(state)
     finally:
         await exchange.close()
+
+# ─── MAIN ─────────────────────────────────────────────────────────────
 
 def main():
     if not TELEGRAM_TOKEN:
@@ -463,7 +511,6 @@ def main():
             )
             logger.info(f"Resumed market_monitor for chat_id {chat_id}")
 
-    # To avoid missing updates if closed
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start))
