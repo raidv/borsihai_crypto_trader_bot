@@ -33,17 +33,20 @@ async def check_pair_15m(exchange, symbol):
     curr = -2  # Wait! The current active candle (incomplete) is -1, the last CLOSED candle is -2.
     prev = -3  # Previous closed candle is -3.
     
-    # Exact cross long
-    long_cross = ema20.iloc[prev] <= ema50.iloc[prev] and ema20.iloc[curr] > ema50.iloc[curr]
-    long_rsi = 55 <= rsi.iloc[curr] <= 65
+    # Step 1: Trend Alignment (Condition)
+    long_trend = ema20.iloc[curr] > ema50.iloc[curr]
+    short_trend = ema20.iloc[curr] < ema50.iloc[curr]
     
-    # Exact cross short
-    short_cross = ema20.iloc[prev] >= ema50.iloc[prev] and ema20.iloc[curr] < ema50.iloc[curr]
-    short_rsi = 35 <= rsi.iloc[curr] <= 45
+    # Step 2: Momentum Trigger (The Signal)
+    # Long: RSI crosses ABOVE 55 (was <= 55, now > 55) and is <= 70
+    long_trigger = (rsi.iloc[prev] <= 55) and (rsi.iloc[curr] > 55) and (rsi.iloc[curr] <= 70)
+    
+    # Short: RSI crosses BELOW 45 (was >= 45, now < 45) and is >= 30
+    short_trigger = (rsi.iloc[prev] >= 45) and (rsi.iloc[curr] < 45) and (rsi.iloc[curr] >= 30)
     
     signal = None
-    if long_cross and long_rsi: signal = "LONG"
-    elif short_cross and short_rsi: signal = "SHORT"
+    if long_trend and long_trigger: signal = "LONG"
+    elif short_trend and short_trigger: signal = "SHORT"
     
     if not signal: return None
     
@@ -70,13 +73,13 @@ async def check_pair_1h(exchange, symbol, signal):
     ema50 = df['EMA_50']
     rsi = df['RSI_14']
     
-    curr = -2 # Check the last closed 1h candle? Or the currently evolving 1h candle?
-    # The prompt says: "the 1h chart _also_ presently meets the entry criteria". Usually this implies the currently evolving candle, or the last closed. Let's use the current evolving one (-1) or last closed (-2). For momentum, last closed (-2) is safer to avoid repainting.
+    curr = -2 # Check the last closed 1h candle
     
+    # Trend Alignment on 1h
     if signal == "LONG":
-        return ema20.iloc[-2] > ema50.iloc[-2] and 55 <= rsi.iloc[-2] <= 65
+        return ema20.iloc[curr] > ema50.iloc[curr]
     elif signal == "SHORT":
-        return ema20.iloc[-2] < ema50.iloc[-2] and 35 <= rsi.iloc[-2] <= 45
+        return ema20.iloc[curr] < ema50.iloc[curr]
     return False
 
 async def get_btc_pct_change(exchange):

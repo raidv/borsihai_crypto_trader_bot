@@ -6,6 +6,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import ccxt.async_support as ccxt
 from dotenv import load_dotenv
+import pandas as pd
+import pandas_ta as ta
 
 from state_manager import load_state, save_state, log_trade
 from scanner import scan_market
@@ -282,19 +284,24 @@ async def market_monitor(context: ContextTypes.DEFAULT_TYPE):
     try:
         symbols = [p['symbol'] for p in positions]
         
-        # Parallel fetch 15m candles to check SL breach accurately
-        async def get_latest_candle(sym):
+        # Parallel fetch 15m candles to check SL breach accurately + Early Exit Logic
+        async def fetch_and_calc_indicators(sym):
             try:
-                ohlcv = await exchange.fetch_ohlcv(sym, "15m", limit=2)
-                if ohlcv and len(ohlcv) >= 2:
-                    return sym, ohlcv[-2] # Last closed candle
+                ohlcv = await exchange.fetch_ohlcv(sym, "15m", limit=50) # Need 50 for EMA50
+                if ohlcv and len(ohlcv) >= 50:
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df.ta.ema(length=20, append=True)
+                    df.ta.ema(length=50, append=True)
+                    df.ta.rsi(length=14, append=True)
+                    return sym, df
                 return sym, None
-            except Exception:
+            except Exception as e:
+                logger.error(f"Error fetching exit data for {sym}: {e}")
                 return sym, None
                 
-        tasks = [get_latest_candle(sym) for sym in symbols]
+        tasks = [fetch_and_calc_indicators(sym) for sym in symbols]
         results = await asyncio.gather(*tasks)
-        candles = {sym: candle for sym, candle in results if candle}
+        candles_dfs = {sym: df for sym, df in results if df is not None}
         
         tickers = await exchange.fetch_tickers(symbols)
         
@@ -310,17 +317,38 @@ async def market_monitor(context: ContextTypes.DEFAULT_TYPE):
             
             current_price = ticker['last']
             
-            # SL Breach Check
+            # SL Breach Check & Early Warning Check
             breached = False
-            if symbol in candles:
-                c = candles[symbol]
-                # c = [timestamp, open, high, low, close, volume]
-                if side == "LONG" and c[3] <= sl:
-                    breached = True
-                elif side == "SHORT" and c[2] >= sl:
-                    breached = True
+            early_exit_warning = None
             
-            # Fallback current price check
+            if symbol in candles_dfs:
+                df = candles_dfs[symbol]
+                # High/Low logic for the last closed candle (-2) to check SL
+                c_low = df['low'].iloc[-2]
+                c_high = df['high'].iloc[-2]
+                
+                if side == "LONG" and c_low <= sl:
+                    breached = True
+                elif side == "SHORT" and c_high >= sl:
+                    breached = True
+                    
+                # Early Exit Check (Trend Reversal or Momentum Death)
+                ema20_curr = df['EMA_20'].iloc[-2]
+                ema50_curr = df['EMA_50'].iloc[-2]
+                rsi_curr = df['RSI_14'].iloc[-2]
+                
+                if side == "LONG":
+                    if ema20_curr < ema50_curr:
+                        early_exit_warning = "Trend Reversal (EMA 20 < EMA 50)"
+                    elif rsi_curr < 45:
+                        early_exit_warning = "Momentum Death (RSI < 45)"
+                elif side == "SHORT":
+                    if ema20_curr > ema50_curr:
+                        early_exit_warning = "Trend Reversal (EMA 20 > EMA 50)"
+                    elif rsi_curr > 55:
+                        early_exit_warning = "Momentum Death (RSI > 55)"
+            
+            # Fallback current price check for strict SL
             if not breached:
                 if side == "LONG" and current_price <= sl: breached = True
                 elif side == "SHORT" and current_price >= sl: breached = True
@@ -338,6 +366,20 @@ async def market_monitor(context: ContextTypes.DEFAULT_TYPE):
                         reply_markup=reply_markup
                     )
                 continue # Skip trailing calculations if breached
+                
+            if early_exit_warning and denial_count < 2:
+                # Ask user if they want to exit early
+                keyboard = [
+                    [InlineKeyboardButton("✅ Closed", callback_data=f"slclosed_{symbol}"),
+                     InlineKeyboardButton("❌ Ignore", callback_data=f"slopen_{symbol}")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await context.bot.send_message(
+                    chat_id=context.job.chat_id,
+                    text=f"⚠️ Early Exit Warning for {symbol}! Reason: {early_exit_warning}. Close position?",
+                    reply_markup=reply_markup
+                )
+                # We do not `continue` here because it's just a warning, we still want to trail stops if possible.
             
             # Trailing Stop Calculation
             # Calculate net profit (deducting 0.2% fee)
