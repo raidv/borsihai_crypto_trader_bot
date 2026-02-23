@@ -638,12 +638,27 @@ def main():
 
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
+    async def error_handler(update, context):
+        logger.exception("Unhandled exception occurred", exc_info=context.error)
+        try:
+            state = load_state()
+            chat_id = state.get("chat_id")
+            if chat_id:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ Bot error occurred:\n{context.error}"
+                )
+        except Exception:
+            pass
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("afk", afk))
     application.add_handler(CommandHandler("ready", ready))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(button_handler))
+
+    application.add_error_handler(error_handler)
 
     logger.info("Starting bot...")
     application.run_polling()
