@@ -5,8 +5,7 @@ import pandas_ta as ta
 import logging
 import os
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("Scanner")
+logger = logging.getLogger(__name__)
 
 async def fetch_ohlcv(exchange, symbol, timeframe, limit=100):
     try:

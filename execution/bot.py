@@ -2,6 +2,7 @@ import asyncio
 import logging
 import math
 import os
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -15,9 +16,32 @@ from scanner import scan_market
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
 
+formatter = logging.Formatter(
+    "%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+# Add console handler only if none exists
+if not any(isinstance(h, logging.StreamHandler) for h in root_logger.handlers):
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    root_logger.addHandler(console)
+
+# Always ensure file handler exists
+if not any(isinstance(h, RotatingFileHandler) for h in root_logger.handlers):
+    file_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("Bot")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -319,12 +343,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
     global _has_run_once
     now = datetime.now(timezone.utc)
+    chat_id = context.job.data["chat_id"]
     
     force_run = False
-    if DEBUG_RUN_IMMEDIATELY and not _has_run_once:
+    if not _has_run_once:
         force_run = True
         _has_run_once = True
-        logger.info("Forcing initial debug market scan...")
+        logger.info("Forcing initial market scan on startup...")
     
     # Only run at minute :01 of each hour
     if not force_run and now.minute != 1:
@@ -383,7 +408,7 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
             f"TP1 (1.5R): {fmt_price(preview_tp1)}\n"
             f"Order Size: ${order_size_usd:.2f} ({coin_qty} coins)"
         )
-        await context.bot.send_message(chat_id=context.job.chat_id, text=text, reply_markup=reply_markup)
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
         
         # Mark as sent
         new_sent[sig_key] = datetime.now(timezone.utc).isoformat()
