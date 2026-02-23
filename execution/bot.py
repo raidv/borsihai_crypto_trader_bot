@@ -16,6 +16,10 @@ from scanner import scan_market
 
 load_dotenv()
 
+LOG_DIR = os.getenv("BOT_LOG_DIR", "/home/pi/borsihai_crypto_trader_bot/logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "bot.log")
+
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 
@@ -24,17 +28,17 @@ formatter = logging.Formatter(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-# Add console handler only if none exists
+# Console (journald) — only add if not already present
 if not any(isinstance(h, logging.StreamHandler) for h in root_logger.handlers):
     console = logging.StreamHandler()
     console.setFormatter(formatter)
     root_logger.addHandler(console)
 
-# Always ensure file handler exists
+# Rotating file — ensure it's present exactly once
 if not any(isinstance(h, RotatingFileHandler) for h in root_logger.handlers):
     file_handler = RotatingFileHandler(
         LOG_FILE,
-        maxBytes=5 * 1024 * 1024,
+        maxBytes=5 * 1024 * 1024,  # 5 MB
         backupCount=5,
         encoding="utf-8",
     )
@@ -43,7 +47,6 @@ if not any(isinstance(h, RotatingFileHandler) for h in root_logger.handlers):
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("Bot")
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEBUG_RUN_IMMEDIATELY = False
 
