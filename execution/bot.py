@@ -16,7 +16,7 @@ from scanner import scan_market
 
 load_dotenv()
 
-LOG_DIR = os.getenv("BOT_LOG_DIR", "/home/pi/borsihai_crypto_trader_bot/logs")
+LOG_DIR = os.getenv("BOT_LOG_DIR", "./logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 LOG_FILE = os.path.join(LOG_DIR, "bot.log")
 
@@ -346,7 +346,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
     global _has_run_once
     now = datetime.now(timezone.utc)
-    chat_id = context.job.data["chat_id"]
     
     force_run = False
     if not _has_run_once:
@@ -365,6 +364,14 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
         return
         
     signals = await scan_market()
+
+    if not signals:
+        # Heartbeat: confirm the scan ran
+        await context.bot.send_message(
+            chat_id=context.job.chat_id,
+            text=f"✅ Heartbeat: scan ran at {now.strftime('%H:%M UTC')} — no signals found."
+        )
+        return
     
     # Deduplicate: check which signals were already sent
     sent_signals = state.get("sent_signals", {})
@@ -411,7 +418,7 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
             f"TP1 (1.5R): {fmt_price(preview_tp1)}\n"
             f"Order Size: ${order_size_usd:.2f} ({coin_qty} coins)"
         )
-        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        await context.bot.send_message(chat_id=context.job.chat_id, text=text, reply_markup=reply_markup)
         
         # Mark as sent
         new_sent[sig_key] = datetime.now(timezone.utc).isoformat()
