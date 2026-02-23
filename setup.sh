@@ -18,7 +18,12 @@ fi
 # 2. Create and activate a Virtual Environment
 if [ ! -d "venv" ]; then
     echo "Creating virtual environment 'venv'..."
-    python3.12 -m venv venv
+    if command -v python3.12 >/dev/null 2>&1; then
+        PYTHON=python3.12
+    else
+        PYTHON=python3
+    fi
+    $PYTHON -m venv venv
 else
     echo "Virtual environment 'venv' already exists."
 fi
