@@ -183,6 +183,9 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Deduplicate vs already-sent signals
     sent_signals = state.get("sent_signals", {})
+    active_positions = state.get("active_positions", [])
+    open_symbols = {p['symbol'] for p in active_positions}
+
     sent_pairs = []
     discarded_pairs = []
     new_sent = dict(sent_signals)
@@ -192,6 +195,10 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         side = sig['signal']
         score = sig.get('score', 0)
         score_display = sig.get('score_display', f"Score: {score}/100")
+
+        if symbol in open_symbols:
+            discarded_pairs.append(f"{symbol} ({side}) — {score}/100 [open pos]")
+            continue
         price = sig['price']
         atr_val = sig.get('atr', 0)
 
@@ -219,7 +226,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         keyboard = [
             [InlineKeyboardButton("✅ Opened", callback_data=f"open_{side}_{symbol}_{atr_val:.4f}_{path}"),
-             InlineKeyboardButton("❌ Ignore", callback_data=f"ignore_{symbol}")]
+             InlineKeyboardButton("❌ Ignore", callback_data=f"ignore_{symbol}_{side}")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -295,6 +302,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data.startswith("open_"):
             await _handle_open(query, data, state, exchange)
         elif data.startswith("ignore_"):
+            parts = data.split("_", 2)
+            if len(parts) >= 3:
+                symbol, side = parts[1], parts[2]
+                sig_key = f"{symbol}_{side}"
+                sent_signals = state.get("sent_signals", {})
+                if sig_key in sent_signals:
+                    del sent_signals[sig_key]
+                    state["sent_signals"] = sent_signals
+                    save_state(state)
             await query.edit_message_text("❌ Ignored signal.")
         elif data.startswith("slclosed_"):
             await _handle_sl_closed(query, data, state)
@@ -358,6 +374,12 @@ async def _handle_open(query, data, state, exchange):
         "denial_count": 0
     })
     state["active_positions"] = positions
+
+    # Remove from sent_signals so it doesn't block future signals if this position closes
+    sig_key = f"{symbol}_{side}"
+    if "sent_signals" in state and sig_key in state["sent_signals"]:
+        del state["sent_signals"][sig_key]
+
     save_state(state)
 
     log_trade("OPEN", symbol, side, price, sl, datetime.now(timezone.utc).timestamp())

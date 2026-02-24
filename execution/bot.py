@@ -80,6 +80,9 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
 
     # Deduplicate: check which signals were already sent
     sent_signals = state.get("sent_signals", {})
+    active_positions = state.get("active_positions", [])
+    open_symbols = {p['symbol'] for p in active_positions}
+
     new_sent = {}
     sent_pairs = []
     discarded_pairs = []
@@ -89,6 +92,11 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
         side = sig['signal']
         score = sig.get('score', 0)
         score_display = sig.get('score_display', f"Score: {score}/100")
+
+        if symbol in open_symbols:
+            logger.info(f"Skipping {symbol} ({side}): already have open position.")
+            discarded_pairs.append(f"{symbol} ({side}) — {score}/100 [open pos]")
+            continue
         price = sig['price']
         atr_val = sig.get('atr', 0)
 
@@ -116,7 +124,7 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
 
         keyboard = [
             [InlineKeyboardButton("✅ Opened", callback_data=f"open_{side}_{symbol}_{atr_val:.4f}_{path}"),
-             InlineKeyboardButton("❌ Ignore", callback_data=f"ignore_{symbol}")]
+             InlineKeyboardButton("❌ Ignore", callback_data=f"ignore_{symbol}_{side}")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
