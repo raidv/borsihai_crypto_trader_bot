@@ -1,0 +1,9 @@
+#!/bin/bash
+# Example script to manually restart the bot service if not using the /restart telegram command
+# Copy to restart_service.sh and execute
+
+SERVICE_NAME=${SYSTEMD_SERVICE_NAME:-borsihai}
+sudo systemctl daemon-reload
+sudo systemctl restart "${SERVICE_NAME}"
+echo "Restarted ${SERVICE_NAME}. Status:"
+sudo systemctl status "${SERVICE_NAME}" --no-pager

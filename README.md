@@ -1,58 +1,86 @@
-# Börsihai 2026 Crypto Assistant
+# Börsihai Crypto Swing Trader 🦈
 
-A Python-based Telegram bot built for the manually-traded "Börsihai 2026" stock market competition on StockTrak. 
+Börsihai is a professional-grade cryptocurrency swing trading assistant designed to run 24/7 (e.g., on a Raspberry Pi). It monitors the market using a multi-timeframe strategy (4H/1H) and sends actionable, scored trading signals directly to Telegram.
 
-This bot monitors the top 100 cryptocurrencies 24/7 on Binance and sends actionable entry alerts directly to Telegram based on a customized momentum algorithmic strategy (EMA crossovers + RSI + Timeframe Confluence) while rigidly managing Risk.
+## Strategy Overview
 
-## Algorithm Overview
-- **Timeframes**: Evaluates 15m and 1h Binance OHLCV data.
-- **Entry Strategy**: Matches exact EMA20/EMA50 crosses with trailing RSI between 55-65 (Long) or 35-45 (Short) on the `15m` timeframe. Signals must also have confluence on the `1h` timeframe.
-- **Priority**: A tie-breaker calculates exactly how much the coin is outperforming/underperforming BTC over the last 4 hours (16 candles) and ranks by the `pairs.txt` order (Market Cap).
-- **Risk Management**: Strictly limits to a max of 20 positions sized equally. Hard-coded rules trail Stop Losses mathematically to guarantee locked profits automatically.
+The bot implements a robust trend-following swing strategy:
+1. **Trend Filter (4H):** Only considers longs if price > 200 EMA (and shorts if < 200 EMA).
+2. **Entry Trigger (1H):** Requires EMA 20/50 alignment, a new MACD cross, and histogram confirmation.
+3. **Signal Scoring:** Signals are scored from 0-100 based on MACD magnitude/acceleration, EMA spread, volume anomalies, ATR-relative moves, and relative strength vs BTC.
+4. **Dynamic Risk Management:** Stop Loss is set at 2x ATR. Take Profit 1 (TP1) is calculated at 1.5R (1.5x risk).
+5. **Position Monitoring:** Tracks active positions every 5 minutes, notifying you to move SL to break-even when TP1 is hit, or to fully exit if a reverse MACD cross occurs.
 
-## Files Structure
-- `execution/bot.py` - The async Telegram Bot and main polling orchestrator.
-- `execution/scanner.py` - The heavy-lifting market intelligence script (`pandas`/`pandas_ta`).
-- `execution/pairs.txt` - The target list of symbols formatted for ccxt (e.g., `BTC/USDT`). Reorder this file to change symbol Market Cap Priority tie-breaking.
-- `state.json` - Saves portfolio balance, historical denial rates, and active trades dynamically so that restarting your bot safely resumes context.
+## Key Features
 
-## Prerequisites
-- **Linux / WSL**
-- **Python 3.12** or newer
-- **A valid Telegram Bot Token** (Acquired via [@BotFather](https://t.me/botfather))
+- **Telegram Interface:** Full control via Telegram (`/status`, `/scan`, `/afk`, `/ready`, `/restart`).
+- **Composite Scoring:** Visual bar charts in Telegram for signal strength evaluation.
+- **Smart Deduplication:** Prevents spamming the same signal multiple times.
+- **AFK Mode (`/afk`):** Pauses new signals and gives you "safety net" SL/TP levels to set manually while you sleep or are away.
+- **Multi-Position Tracking:** Tracks up to 10 open positions simultaneously, managing capital allocation and simulated PnL.
+- **Robust Persistence:** Atomic JSON state saving ensures your portfolio data survives reboots.
 
-## Auto-Setup
-To effortlessly set up this bot on a new clean Linux, Ubuntu, or Windows WSL instance, run the interactive installer:
+## Project Structure
+
+- `execution/bot.py`: Main entrypoint; registers Telegram handlers and the hourly scan cronjob.
+- `execution/config.py`: Centralized constants, logging setup, and price formatting.
+- `execution/scanner.py`: The core market analysis logic, indicators, and composite scoring.
+- `execution/state_manager.py`: Atomic read/write operations for `state.json` and `trade_log.json`.
+- `execution/telegram_handlers.py`: Command and interactive button logic.
+- `execution/position_manager.py`: The 5-minute loop that monitors SL breaches, TP hits, and MACD momentum exits.
+
+## Installation & Setup
+
+### 1. Prerequisites
+- Linux OS (Ubuntu, Debian, Raspberry Pi OS)
+- Python 3.11+
+- A Telegram Bot Token from [@BotFather](https://t.me/botfather)
+
+### 2. Basic Setup
+```bash
+git clone https://github.com/raidv/borsihai_crypto_trader_bot.git
+cd borsihai_crypto_trader_bot
+
+# Run the setup script (installs python3.12, venv, dependencies)
+./setup.sh
+
+# Configure your environment variables
+cp .env.example .env
+nano .env # Paste your TELEGRAM_TOKEN
+```
+
+### 3. Systemd Service Setup (Recommended)
+To ensure the bot starts automatically on boot and recovers from crashes, install it as a systemd service:
+
+> [!CAUTION]
+> The setup script uses `sudo` to write to `/etc/systemd/system/`. Review `setup_service.sh` if you prefer manual configuration.
 
 ```bash
-chmod +x setup.sh
-./setup.sh
+chmod +x setup_service.sh
+./setup_service.sh
 ```
-*(This automatically safely validates the OS, installs Python 3.12, builds the `venv`, and pulls all dependencies.)*
 
-## How to Run
+### 4. Activating the Bot
+Once the service is running, open Telegram and message your bot:
+1. Send any command (e.g., `/help`) — the bot will automatically capture and register your Chat ID.
+2. Send `/start` — this activates the hourly signal scanner and the 5-minute position monitor.
 
-1. **Configure Token**: You have two options to provide your Telegram bot token:
-   
-   **Option A (Recommended)**: Copy the `.env.example` file to `.env` and paste your token inside it:
-   ```bash
-   cp .env.example .env
-   # Then edit .env and replace YOUR_BOT_TOKEN_FROM_BOTFATHER with your actual token
-   ```
+## Telegram Commands
 
-   **Option B (Terminal)**: Export the token directly to an environment variable in your terminal:
-   ```bash
-   export TELEGRAM_TOKEN='YOUR_BOT_TOKEN_FROM_BOTFATHER'
-   ```
+- `/start` - Activate monitoring loops.
+- `/status` - View portfolio equity, available cash, and detailed status (Entry, SL, TP1) of all open positions.
+- `/afk` - Pause scanning and receive safety stop-loss/take-profit levels for all open positions.
+- `/ready` - Resume active signal scanning.
+- `/scan` - Force an immediate market scan and receive a detailed summary (Pairs scanned, Alerts sent, Alerts discarded).
+- `/restart` - Restarts the underlying systemd service (requires sudo privileges configured for the bot user).
+- `/help` - Show the help manual.
 
-2. **Launch the Bot**:
-   ```bash
-   ./run.sh
-   ```
-3. **Connect in Telegram**: Send `/start` to your Bot in Telegram. This tells the bot what your personal User ID is and enables the 15-minute scheduled polling scanners directly to you.
+## Development & Testing
 
-## Bot Commands
-- `/start`: Mounts your user ID to trigger the background scanning loop.
-- `/status`: Check your floating P/L, portfolio balance, and dynamically see all active Open Trades & their hard SL thresholds.
-- `/afk`: Halts scanners from proposing *new* pairs and explicitly calculates a quick `+10%` Take Profit point (TP) for every open position so you can set "Safety Nets" on StockTrak when you go to sleep.
-- `/ready`: Drops the bot out of AFK mode and resumes sending momentum pair signals.
+Börsihai includes a comprehensive unit test suite covering state management, market scanning, and bot logic.
+
+```bash
+source venv/bin/activate
+cd execution
+python -m pytest tests/ -v
+```
