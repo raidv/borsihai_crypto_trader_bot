@@ -1,4 +1,4 @@
-"""Tests for scanner.py — market scanning and signal detection."""
+"""Tests for scanner.py — market scanning, signal detection, and scoring."""
 import asyncio
 import os
 import sys
@@ -66,7 +66,6 @@ class TestFetchOhlcv:
 class TestCheck4hTrend:
     @pytest.mark.asyncio
     async def test_returns_long_when_above_ema200(self):
-        # Create uptrending data where price >> EMA200
         df = make_ohlcv_df(n=210, base_price=100.0, trend="up", volatility=0.005)
         mock_exchange = AsyncMock()
 
@@ -87,9 +86,7 @@ class TestCheck4hTrend:
 
         mock_exchange.fetch_ohlcv = mock_fetch
         result = await scanner.check_4h_trend(mock_exchange, "BTC/USDT")
-        # With strong uptrend, close > EMA200 → LONG
         assert result in ("LONG", "SHORT", None)
-        # The uptrend should make price > EMA200
         if result is not None:
             assert result == "LONG"
 
@@ -97,7 +94,7 @@ class TestCheck4hTrend:
     async def test_returns_none_on_insufficient_data(self):
         mock_exchange = AsyncMock()
         mock_exchange.fetch_ohlcv.return_value = make_ohlcv_raw(
-            [[100, 105, 95, 102, 1000]] * 50  # Only 50 candles, need 201
+            [[100, 105, 95, 102, 1000]] * 50
         )
         result = await scanner.check_4h_trend(mock_exchange, "BTC/USDT")
         assert result is None
@@ -132,7 +129,6 @@ class TestCheck1hEntry:
 
     @pytest.mark.asyncio
     async def test_returns_none_when_no_signal(self):
-        # Flat market — no EMA cross
         df = make_ohlcv_df(n=100, trend="flat", volatility=0.001)
         mock_exchange = AsyncMock()
 
@@ -153,13 +149,11 @@ class TestCheck1hEntry:
 
         mock_exchange.fetch_ohlcv = mock_fetch
         result = await scanner.check_1h_entry(mock_exchange, "BTC/USDT", "LONG")
-        # A flat market shouldn't produce a signal (or may, but that's valid too)
-        # Just ensure it returns dict or None
         assert result is None or isinstance(result, dict)
 
     @pytest.mark.asyncio
     async def test_signal_contains_required_fields(self):
-        """If a signal is returned, it must have symbol, signal, price, atr."""
+        """If a signal is returned, it must have symbol, signal, price, atr, indicator_data."""
         df = make_ohlcv_with_long_signal(n=100)
         mock_exchange = AsyncMock()
 
@@ -185,6 +179,7 @@ class TestCheck1hEntry:
             assert "signal" in result
             assert "price" in result
             assert "atr" in result
+            assert "indicator_data" in result
             assert result["signal"] == "LONG"
 
 
@@ -203,7 +198,6 @@ class TestGetBtcPctChange:
 
     @pytest.mark.asyncio
     async def test_positive_change_on_uptrend(self):
-        # Strong uptrend: prices going from 100 to 120
         prices = [100, 102, 104, 106, 108, 110, 112, 114, 116, 118]
         raw = [[p, p + 1, p - 1, p, 500000] for p in prices]
         mock_exchange = AsyncMock()
@@ -242,7 +236,7 @@ class TestGetBtcPctChange:
 
 class TestScanMarket:
     @pytest.mark.asyncio
-    async def test_returns_list(self, tmp_path):
+    async def test_returns_dict_with_signals_and_metadata(self, tmp_path):
         pairs_file = tmp_path / "pairs.txt"
         pairs_file.write_text("BTC/USDT\nETH/USDT\n")
 
@@ -250,27 +244,29 @@ class TestScanMarket:
             mock_exchange = AsyncMock()
             mock_ccxt_module.binance.return_value = mock_exchange
 
-            # fetch_ohlcv returns insufficient data → no signals
             mock_exchange.fetch_ohlcv.return_value = make_ohlcv_raw(
                 [[100, 105, 95, 102, 1000]] * 50
             )
 
             with patch.object(scanner.os.path, "dirname", return_value=str(tmp_path)):
                 result = await scanner.scan_market()
-            assert isinstance(result, list)
+            assert isinstance(result, dict)
+            assert "signals" in result
+            assert "metadata" in result
+            assert isinstance(result["signals"], list)
+            assert isinstance(result["metadata"], dict)
+            assert "pairs_scanned" in result["metadata"]
 
     @pytest.mark.asyncio
-    async def test_returns_empty_when_no_pairs_file(self, tmp_path):
-        with patch.object(
-            scanner.os.path, "dirname", return_value=str(tmp_path)
-        ):
+    async def test_returns_metadata_when_no_pairs_file(self, tmp_path):
+        with patch.object(scanner.os.path, "dirname", return_value=str(tmp_path)):
             result = await scanner.scan_market()
-        assert result == []
+        assert isinstance(result, dict)
+        assert result["signals"] == []
+        assert result["metadata"]["pairs_scanned"] == 0
 
     @pytest.mark.asyncio
     async def test_max_10_signals(self, tmp_path):
-        """Even if many signals found, should return at most 10."""
-        # This test validates the slicing at return signals[:10]
         pairs = [f"COIN{i}/USDT" for i in range(20)]
         pairs_file = tmp_path / "pairs.txt"
         pairs_file.write_text("\n".join(pairs))
@@ -279,25 +275,176 @@ class TestScanMarket:
             mock_exchange = AsyncMock()
             mock_ccxt_module.binance.return_value = mock_exchange
 
-            # Make all pairs return insufficient data → no signals → empty list
             mock_exchange.fetch_ohlcv.return_value = make_ohlcv_raw(
                 [[100, 105, 95, 102, 1000]] * 50
             )
 
             with patch.object(scanner.os.path, "dirname", return_value=str(tmp_path)):
                 result = await scanner.scan_market()
-            assert len(result) <= 10
+            assert len(result["signals"]) <= 10
 
     @pytest.mark.asyncio
     async def test_signals_sorted_by_score_desc(self, tmp_path):
-        """If multiple signals returned, they should be sorted by score descending."""
-        # Create mock signals directly since scan_market has complex logic
+        """Signal sorting by composite score descending, then mc_rank."""
         signals = [
-            {"symbol": "A/USDT", "signal": "LONG", "price": 100, "atr": 2, "score": 0.01, "mc_rank": 0},
-            {"symbol": "B/USDT", "signal": "LONG", "price": 200, "atr": 4, "score": 0.05, "mc_rank": 1},
-            {"symbol": "C/USDT", "signal": "SHORT", "price": 50, "atr": 1, "score": 0.03, "mc_rank": 2},
+            {"symbol": "A/USDT", "signal": "LONG", "price": 100, "atr": 2, "score": 30, "mc_rank": 0},
+            {"symbol": "B/USDT", "signal": "LONG", "price": 200, "atr": 4, "score": 85, "mc_rank": 1},
+            {"symbol": "C/USDT", "signal": "SHORT", "price": 50, "atr": 1, "score": 60, "mc_rank": 2},
         ]
         signals.sort(key=lambda x: (-x["score"], x["mc_rank"]))
         assert signals[0]["symbol"] == "B/USDT"
         assert signals[1]["symbol"] == "C/USDT"
         assert signals[2]["symbol"] == "A/USDT"
+
+
+# ─── compute_signal_score ─────────────────────────────────────────────
+
+
+class TestComputeSignalScore:
+    """Tests for the composite signal scoring function."""
+
+    def test_returns_score_in_range(self):
+        indicator_data = {
+            "macd_hist_current": 0.5,
+            "macd_hist_previous": 0.3,
+            "macd_hist_series": [0.1, 0.2, 0.3, 0.4, 0.5],
+            "ema20": 105.0,
+            "ema50": 100.0,
+            "volume_current": 1500000,
+            "volume_series": [1000000] * 20,
+            "candle_body": 2.0,
+            "atr_val": 3.0,
+        }
+        result = scanner.compute_signal_score(indicator_data, 0.02)
+        assert 0 <= result["composite"] <= 100
+        assert "components" in result
+
+    def test_all_components_present(self):
+        indicator_data = {
+            "macd_hist_current": 0.5,
+            "macd_hist_previous": 0.3,
+            "macd_hist_series": [0.1, 0.2, 0.3, 0.4, 0.5],
+            "ema20": 105.0,
+            "ema50": 100.0,
+            "volume_current": 1500000,
+            "volume_series": [1000000] * 20,
+            "candle_body": 2.0,
+            "atr_val": 3.0,
+        }
+        result = scanner.compute_signal_score(indicator_data, 0.02)
+        expected_components = [
+            "macd_magnitude",
+            "macd_acceleration",
+            "ema_spread",
+            "volume",
+            "atr_move",
+            "btc_relative",
+        ]
+        for comp in expected_components:
+            assert comp in result["components"]
+            assert 0 <= result["components"][comp] <= 100
+
+    def test_strong_momentum_scores_high(self):
+        """Strong indicators should produce a high score."""
+        indicator_data = {
+            "macd_hist_current": 1.0,
+            "macd_hist_previous": 0.3,
+            "macd_hist_series": [0.1, 0.2, 0.3, 0.5, 1.0],
+            "ema20": 110.0,
+            "ema50": 100.0,
+            "volume_current": 3000000,
+            "volume_series": [1000000] * 20,
+            "candle_body": 4.0,
+            "atr_val": 3.0,
+        }
+        result = scanner.compute_signal_score(indicator_data, 0.05)
+        assert result["composite"] >= 60
+
+    def test_weak_momentum_scores_low(self):
+        """Weak indicators should produce a low score."""
+        indicator_data = {
+            "macd_hist_current": 0.01,
+            "macd_hist_previous": 0.01,
+            "macd_hist_series": [0.5, 0.4, 0.3, 0.02, 0.01],
+            "ema20": 100.1,
+            "ema50": 100.0,
+            "volume_current": 300000,
+            "volume_series": [1000000] * 20,
+            "candle_body": 0.1,
+            "atr_val": 3.0,
+        }
+        result = scanner.compute_signal_score(indicator_data, -0.05)
+        assert result["composite"] <= 40
+
+    def test_handles_zero_values(self):
+        indicator_data = {
+            "macd_hist_current": 0,
+            "macd_hist_previous": 0,
+            "macd_hist_series": [0] * 20,
+            "ema20": 100.0,
+            "ema50": 100.0,
+            "volume_current": 0,
+            "volume_series": [0] * 20,
+            "candle_body": 0,
+            "atr_val": 0,
+        }
+        result = scanner.compute_signal_score(indicator_data, 0.0)
+        assert 0 <= result["composite"] <= 100
+
+    def test_handles_empty_series(self):
+        indicator_data = {
+            "macd_hist_current": 0.5,
+            "macd_hist_previous": 0.3,
+            "macd_hist_series": [],
+            "ema20": 105.0,
+            "ema50": 100.0,
+            "volume_current": 1500000,
+            "volume_series": [],
+            "candle_body": 2.0,
+            "atr_val": 3.0,
+        }
+        result = scanner.compute_signal_score(indicator_data, 0.02)
+        assert 0 <= result["composite"] <= 100
+
+
+# ─── format_score_label ───────────────────────────────────────────────
+
+
+class TestFormatScoreLabel:
+    def test_very_strong(self):
+        assert "Very Strong" in scanner.format_score_label(85)
+
+    def test_strong(self):
+        assert "Strong" in scanner.format_score_label(65)
+
+    def test_moderate(self):
+        assert "Moderate" in scanner.format_score_label(45)
+
+    def test_weak(self):
+        assert "Weak" in scanner.format_score_label(25)
+
+    def test_very_weak(self):
+        assert "Very Weak" in scanner.format_score_label(10)
+
+
+# ─── format_score_display ─────────────────────────────────────────────
+
+
+class TestFormatScoreDisplay:
+    def test_contains_score_and_label(self):
+        score_data = {
+            "composite": 72,
+            "components": {
+                "macd_magnitude": 80,
+                "macd_acceleration": 60,
+                "ema_spread": 50,
+                "volume": 90,
+                "atr_move": 65,
+                "btc_relative": 70,
+            },
+        }
+        result = scanner.format_score_display(score_data, 0.023)
+        assert "72/100" in result
+        assert "Strong" in result
+        assert "█" in result
+        assert "BTC" in result
