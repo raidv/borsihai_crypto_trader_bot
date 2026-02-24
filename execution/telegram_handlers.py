@@ -156,6 +156,130 @@ async def ready(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 
+async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trigger an immediate market scan and return a full summary."""
+    from scanner import scan_market
+    state = load_state()
+    state, newly_registered = _ensure_chat_id(update, state)
+
+    await update.message.reply_text("🔍 Running market scan now, this may take ~30 seconds...")
+
+    scan_result = await scan_market()
+    signal_list = scan_result.get("signals", [])
+    metadata = scan_result.get("metadata", {})
+    pairs_scanned = metadata.get("pairs_scanned", 0)
+    now_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
+
+    if not signal_list:
+        msg = (
+            f"✅ Manual scan complete ({now_str})\n"
+            f"Pairs scanned: {pairs_scanned}\n"
+            f"No signals found."
+        )
+        if newly_registered:
+            msg += "\n\nℹ️ Chat ID registered. Send /start to activate monitoring jobs."
+        await update.message.reply_text(msg)
+        return
+
+    # Deduplicate vs already-sent signals
+    sent_signals = state.get("sent_signals", {})
+    sent_pairs = []
+    discarded_pairs = []
+    new_sent = dict(sent_signals)
+
+    for sig in signal_list:
+        symbol = sig['symbol']
+        side = sig['signal']
+        score = sig.get('score', 0)
+        score_display = sig.get('score_display', f"Score: {score}/100")
+        price = sig['price']
+        atr_val = sig.get('atr', 0)
+
+        sig_key = f"{symbol}_{side}"
+        if sig_key in sent_signals:
+            discarded_pairs.append(f"{symbol} ({side}) — {score}/100 [already sent]")
+            continue
+
+        # Calculate preview levels
+        initial_risk = ATR_MULTIPLIER * atr_val if atr_val > 0 else price * 0.04
+        if side == "LONG":
+            preview_sl = price - initial_risk
+            preview_tp1 = price + (initial_risk * TP1_RR_RATIO)
+        else:
+            preview_sl = price + initial_risk
+            preview_tp1 = price - (initial_risk * TP1_RR_RATIO)
+
+        balance = state.get("portfolio_balance", DEFAULT_PORTFOLIO_BALANCE)
+        order_size_usd = balance * POSITION_SIZE_PCT
+        coin_qty = math.floor(order_size_usd / price) if price > 0 else 0
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        keyboard = [
+            [InlineKeyboardButton("✅ Opened", callback_data=f"open_{side}_{symbol}_{atr_val:.4f}"),
+             InlineKeyboardButton("❌ Ignore", callback_data=f"ignore_{symbol}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        text = (
+            f"🚨 **ACTION REQUIRED: {side} Signal** 🚨\n"
+            f"Symbol: {symbol}\n"
+            f"{score_display}\n"
+            f"Entry Price: {fmt_price(price)}\n"
+            f"Stop Loss: {fmt_price(preview_sl)}\n"
+            f"TP1 (1.5R): {fmt_price(preview_tp1)}\n"
+            f"Order Size: ${order_size_usd:.2f} ({coin_qty} coins)"
+        )
+        await update.message.reply_text(text, reply_markup=reply_markup)
+        new_sent[sig_key] = datetime.now(timezone.utc).isoformat()
+        sent_pairs.append(f"{symbol} ({side}) — {score}/100")
+
+    # Persist updated sent_signals
+    state["sent_signals"] = new_sent
+    save_state(state)
+
+    # Send summary
+    summary = f"📋 **Manual Scan Summary** ({now_str})\n"
+    summary += f"Pairs scanned: {pairs_scanned}\n"
+    summary += f"Alerts generated: {len(signal_list)} | Sent: {len(sent_pairs)} | Discarded: {len(discarded_pairs)}\n"
+    if sent_pairs:
+        summary += "\n**Sent:**\n" + "\n".join(f"  • {p}" for p in sent_pairs)
+    if discarded_pairs:
+        summary += "\n**Discarded:**\n" + "\n".join(f"  • {p}" for p in discarded_pairs)
+    if newly_registered:
+        summary += "\n\nℹ️ Chat ID registered. Send /start to activate monitoring jobs."
+    await update.message.reply_text(summary)
+
+
+async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Restart the systemd service. Bot process will be killed and relaunched."""
+    import subprocess
+    from config import SYSTEMD_SERVICE_NAME
+
+    state = load_state()
+    _ensure_chat_id(update, state)
+
+    await update.message.reply_text(
+        f"🔄 Restarting service `{SYSTEMD_SERVICE_NAME}`...\n"
+        f"Bot will be back in a few seconds.",
+        parse_mode="Markdown"
+    )
+
+    try:
+        subprocess.Popen(
+            ["sudo", "systemctl", "daemon-reload"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).wait(timeout=10)
+        subprocess.Popen(
+            ["sudo", "systemctl", "restart", SYSTEMD_SERVICE_NAME],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        logger.error(f"Restart failed: {e}")
+        await update.message.reply_text(f"⚠️ Restart command failed: {e}")
+
+
 # ─── BUTTON HANDLERS ──────────────────────────────────────────────────
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):

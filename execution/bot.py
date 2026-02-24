@@ -12,7 +12,7 @@ from config import (
 )
 from state_manager import load_state, save_state
 from scanner import scan_market
-from telegram_handlers import start, status, afk, ready, help_command, button_handler
+from telegram_handlers import start, status, afk, ready, help_command, button_handler, scan, restart
 from position_manager import position_monitor
 
 setup_logging()
@@ -163,7 +163,11 @@ def main():
         chat_id = state.get("chat_id")
         if chat_id:
             register_jobs(application.job_queue, chat_id)
-            logger.info(f"Resumed signal_scanner + position_monitor for chat_id {chat_id}")
+            msg = "🟢 **Börsihai Bot Started**\nService has been initiated successfully."
+            await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+            logger.info(f"Sent startup message and resumed jobs for chat_id {chat_id}")
+        else:
+            logger.warning("No chat_id found in state. User must send /start to activate.")
 
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
@@ -184,6 +188,8 @@ def main():
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("afk", afk))
     application.add_handler(CommandHandler("ready", ready))
+    application.add_handler(CommandHandler("scan", scan))
+    application.add_handler(CommandHandler("restart", restart))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
