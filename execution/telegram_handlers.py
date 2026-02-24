@@ -184,7 +184,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Deduplicate vs already-sent signals
     sent_signals = state.get("sent_signals", {})
     active_positions = state.get("active_positions", [])
-    open_symbols = {p['symbol'] for p in active_positions}
+    open_positions_set = {f"{p['symbol']}_{p.get('side', 'LONG')}" for p in active_positions}
 
     sent_pairs = []
     discarded_pairs = []
@@ -196,7 +196,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         score = sig.get('score', 0)
         score_display = sig.get('score_display', f"Score: {score}/100")
 
-        if symbol in open_symbols:
+        if f"{symbol}_{side}" in open_positions_set:
             discarded_pairs.append(f"{symbol} ({side}) — {score}/100 [open pos]")
             continue
         price = sig['price']

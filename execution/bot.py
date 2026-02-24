@@ -81,7 +81,7 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
     # Deduplicate: check which signals were already sent
     sent_signals = state.get("sent_signals", {})
     active_positions = state.get("active_positions", [])
-    open_symbols = {p['symbol'] for p in active_positions}
+    open_positions_set = {f"{p['symbol']}_{p.get('side', 'LONG')}" for p in active_positions}
 
     new_sent = {}
     sent_pairs = []
@@ -93,8 +93,8 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
         score = sig.get('score', 0)
         score_display = sig.get('score_display', f"Score: {score}/100")
 
-        if symbol in open_symbols:
-            logger.info(f"Skipping {symbol} ({side}): already have open position.")
+        if f"{symbol}_{side}" in open_positions_set:
+            logger.info(f"Skipping {symbol} ({side}): already have open position in this direction.")
             discarded_pairs.append(f"{symbol} ({side}) — {score}/100 [open pos]")
             continue
         price = sig['price']
