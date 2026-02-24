@@ -213,15 +213,18 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_size_usd = balance * POSITION_SIZE_PCT
         coin_qty = math.floor(order_size_usd / price) if price > 0 else 0
 
+        path = sig.get('path', 'TA')
+        path_label = "[TREND]" if path == "TA" else "[COUNTERTREND]"
+
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         keyboard = [
-            [InlineKeyboardButton("✅ Opened", callback_data=f"open_{side}_{symbol}_{atr_val:.4f}"),
+            [InlineKeyboardButton("✅ Opened", callback_data=f"open_{side}_{symbol}_{atr_val:.4f}_{path}"),
              InlineKeyboardButton("❌ Ignore", callback_data=f"ignore_{symbol}")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         text = (
-            f"🚨 **ACTION REQUIRED: {side} Signal** 🚨\n"
+            f"🚨 **ACTION REQUIRED: {path_label} {side} Signal** 🚨\n"
             f"Symbol: {symbol}\n"
             f"{score_display}\n"
             f"Entry Price: {fmt_price(price)}\n"
@@ -307,10 +310,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _handle_open(query, data, state, exchange):
     """Process 'Opened' button click — record position."""
-    parts = data.split("_", 3)
+    parts = data.split("_", 4)
     side = parts[1]
     symbol = parts[2]
     atr_val = float(parts[3]) if len(parts) > 3 else 0.0
+    path = parts[4] if len(parts) > 4 else "TA"
 
     positions = state.get("active_positions", [])
     if len(positions) >= MAX_POSITIONS:
@@ -343,6 +347,7 @@ async def _handle_open(query, data, state, exchange):
     positions.append({
         "symbol": symbol,
         "side": side,
+        "path": path,
         "entry_price": price,
         "allocated_capital": allocated_capital,
         "initial_risk": initial_risk,

@@ -4,12 +4,20 @@ Börsihai is a professional-grade cryptocurrency swing trading assistant designe
 
 ## Strategy Overview
 
-The bot implements a robust trend-following swing strategy:
-1. **Trend Filter (4H):** Only considers longs if price > 200 EMA (and shorts if < 200 EMA).
-2. **Entry Trigger (1H):** Requires EMA 20/50 alignment, a new MACD cross, and histogram confirmation.
-3. **Signal Scoring:** Signals are scored from 0-100 based on MACD magnitude/acceleration, EMA spread, volume anomalies, ATR-relative moves, and relative strength vs BTC.
-4. **Dynamic Risk Management:** Stop Loss is set at 2x ATR. Take Profit 1 (TP1) is calculated at 1.5R (1.5x risk).
-5. **Position Monitoring:** Tracks active positions every 5 minutes, notifying you to move SL to break-even when TP1 is hit, or to fully exit if a reverse MACD cross occurs.
+## Strategy Overview
+
+The bot implements a robust **Hybrid** swing strategy:
+1. **Trend Filter (4H Regime):** Determines the baseline direction. Long if price > 200 EMA; Short if < 200 EMA.
+2. **Dual-Path Entry Trigger (1H):** 
+   - **Path A (Trend-Aligned - TA):** Matches 4H regime, simply requires EMA 20/50 alignment, a new MACD cross, and 2 bars of histogram confirmation.
+   - **Path B (Countertrend - CT):** Triggers against the 4H regime ONLY under extreme constraints (explosive histogram momentum percentile, 3 bars holding, breakout of 12-bar range, high relative volume).
+3. **Unified Pillar Scoring:** Signals are scored from 0-100 across 4 pillars:
+   - **Momentum (40pts):** Histogram persistence, Delta percentile, Magnitude percentile.
+   - **Structure (25pts):** EMA alignment, breakout status, anti-chase penalty.
+   - **Cleanliness (20pts):** Relative volume percentile, candlestick wick safety.
+   - **Context (15pts):** Alignment with 4H regime, directional BTC relative strength.
+4. **Dynamic Risk Management:** Stop Loss is set at ~ATR-based spacing. Take Profit 1 (TP1) is calculated at 1.5R (1.5x risk).
+5. **Position Monitoring:** Tracks active positions every 5 minutes, notifying you to move SL to break-even when TP1 is hit, or to fully exit if a reverse MACD cross or **CT Momentum Fade** occurs.
 
 ## Key Features
 

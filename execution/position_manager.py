@@ -86,10 +86,10 @@ async def _fetch_position_data(exchange, positions, symbols):
             logger.error(f"Error fetching 1H MACD for {sym}: {e}")
             return sym, None
 
-    tp1_hit_symbols = list(set(p['symbol'] for p in positions if p.get('tp1_hit', False)))
+    macd_symbols = list(set(p['symbol'] for p in positions if p.get('tp1_hit', False) or p.get('path', 'TA') == 'CT'))
 
     candle_tasks = [fetch_5m_candle(sym) for sym in symbols]
-    macd_tasks = [fetch_1h_macd(sym) for sym in tp1_hit_symbols]
+    macd_tasks = [fetch_1h_macd(sym) for sym in macd_symbols]
 
     all_results = await asyncio.gather(*candle_tasks, *macd_tasks)
 
@@ -178,9 +178,11 @@ async def _check_position(context, p, tickers, candles_5m, macd_dfs):
             )
             return
 
-    # ── MACD momentum exit (only for positions where TP1 already hit) ──
-    if tp1_hit and symbol in macd_dfs and denial_count < 2:
-        await _check_macd_exit(context, p, current_price, macd_dfs[symbol])
+    # ── MACD momentum exit & CT Momentum Fade ──
+    path = p.get('path', 'TA')
+    if symbol in macd_dfs and denial_count < 2:
+        if tp1_hit or path == "CT":
+            await _check_momentum_exit(context, p, current_price, macd_dfs[symbol])
 
 
 def _check_tp1(side, current_price, tp1, candle_5m):
@@ -202,15 +204,18 @@ def _check_tp1(side, current_price, tp1, candle_5m):
     return tp1_reached
 
 
-async def _check_macd_exit(context, p, current_price, df):
-    """Check for MACD momentum exit signal."""
+async def _check_momentum_exit(context, p, current_price, df):
+    """Check for MACD momentum exit or CT momentum fade signal."""
     symbol = p['symbol']
     side = p.get('side', 'LONG')
+    path = p.get('path', 'TA')
+    tp1_hit = p.get('tp1_hit', False)
 
     macd_line = df.get('MACD_12_26_9')
     macd_signal_line = df.get('MACDs_12_26_9')
+    macd_hist = df.get('MACDh_12_26_9')
 
-    if macd_line is None or macd_signal_line is None:
+    if macd_line is None or macd_signal_line is None or macd_hist is None:
         return
 
     ml_curr = macd_line.iloc[-2]
@@ -218,17 +223,40 @@ async def _check_macd_exit(context, p, current_price, df):
     ml_prev = macd_line.iloc[-3]
     ms_prev = macd_signal_line.iloc[-3]
 
-    if any(pd.isna(x) for x in [ml_curr, ms_curr, ml_prev, ms_prev]):
+    mh_curr = macd_hist.iloc[-2]
+    mh_prev = macd_hist.iloc[-3]
+    mh_prev2 = macd_hist.iloc[-4]
+
+    if any(pd.isna(x) for x in [ml_curr, ms_curr, ml_prev, ms_prev, mh_curr, mh_prev, mh_prev2]):
         return
 
     macd_exit = False
     reason = ""
-    if side == "LONG" and ml_prev >= ms_prev and ml_curr < ms_curr:
-        macd_exit = True
-        reason = "MACD bearish cross on 1H"
-    elif side == "SHORT" and ml_prev <= ms_prev and ml_curr > ms_curr:
-        macd_exit = True
-        reason = "MACD bullish cross on 1H"
+
+    if tp1_hit:
+        if side == "LONG" and ml_prev >= ms_prev and ml_curr < ms_curr:
+            macd_exit = True
+            reason = "MACD bearish cross on 1H"
+        elif side == "SHORT" and ml_prev <= ms_prev and ml_curr > ms_curr:
+            macd_exit = True
+            reason = "MACD bullish cross on 1H"
+
+    if not macd_exit and path == "CT":
+        if side == "LONG":
+            delta_1 = mh_curr - mh_prev
+            delta_2 = mh_prev - mh_prev2
+            cross_against = ml_prev >= ms_prev and ml_curr < ms_curr
+        else:
+            delta_1 = -(mh_curr - mh_prev)
+            delta_2 = -(mh_prev - mh_prev2)
+            cross_against = ml_prev <= ms_prev and ml_curr > ms_curr
+
+        if delta_1 < 0 and delta_2 < 0:
+            macd_exit = True
+            reason = "CT Momentum Fading (Hist Delta negative for 2 bars)"
+        elif cross_against:
+            macd_exit = True
+            reason = "MACD crossed against CT trade"
 
     if macd_exit:
         keyboard = [
@@ -236,10 +264,12 @@ async def _check_macd_exit(context, p, current_price, df):
              InlineKeyboardButton("❌ Ignore", callback_data=f"slopen_{symbol}")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
+        msg_title = "🚨 **ACTION REQUIRED: Momentum Fading - Consider Taking Profit**" if path == "CT" and not tp1_hit else "🚨 **ACTION REQUIRED: Momentum Exit**"
+
         await context.bot.send_message(
             chat_id=context.job.chat_id,
             text=(
-                f"🚨 **ACTION REQUIRED: Momentum Exit** for {symbol}!\n"
+                f"{msg_title} for {symbol}!\n"
                 f"Reason: {reason}\n"
                 f"Current price: {fmt_price(current_price)}\n"
                 f"Close remaining position."

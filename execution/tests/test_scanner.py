@@ -59,6 +59,19 @@ class TestFetchOhlcv:
         df = await scanner.fetch_ohlcv(mock_exchange, "BTC/USDT", "1h")
         assert pd.api.types.is_datetime64_any_dtype(df["timestamp"])
 
+class TestCalcPct:
+    def test_calc_pct_normal(self):
+        arr = [1.0, 2.0, 3.0, 4.0, 5.0]
+        # values less than 3 -> 1.0, 2.0 (2 out of 5)
+        assert scanner.calc_pct(3.0, arr) == 40.0
+
+    def test_calc_pct_empty(self):
+        assert scanner.calc_pct(10.0, []) == 50.0
+
+    def test_calc_pct_max(self):
+        arr = [1, 2, 3]
+        assert scanner.calc_pct(10, arr) == 100.0
+
 
 # ─── check_4h_trend ───────────────────────────────────────────────────
 
@@ -305,15 +318,19 @@ class TestComputeSignalScore:
 
     def test_returns_score_in_range(self):
         indicator_data = {
-            "macd_hist_current": 0.5,
-            "macd_hist_previous": 0.3,
-            "macd_hist_series": [0.1, 0.2, 0.3, 0.4, 0.5],
+            "persistence": 3,
+            "delta_pct": 80.0,
+            "mag_pct": 70.0,
             "ema20": 105.0,
             "ema50": 100.0,
-            "volume_current": 1500000,
-            "volume_series": [1000000] * 20,
-            "candle_body": 2.0,
+            "price": 106.0,
             "atr_val": 3.0,
+            "vol_pct": 85.0,
+            "body_ratio": 0.8,
+            "path": "TA",
+            "regime_4h": "LONG",
+            "trade_dir": "LONG",
+            "is_breakout": True
         }
         result = scanner.compute_signal_score(indicator_data, 0.02)
         assert 0 <= result["composite"] <= 100
@@ -321,24 +338,32 @@ class TestComputeSignalScore:
 
     def test_all_components_present(self):
         indicator_data = {
-            "macd_hist_current": 0.5,
-            "macd_hist_previous": 0.3,
-            "macd_hist_series": [0.1, 0.2, 0.3, 0.4, 0.5],
+            "persistence": 3,
+            "delta_pct": 80.0,
+            "mag_pct": 70.0,
             "ema20": 105.0,
             "ema50": 100.0,
-            "volume_current": 1500000,
-            "volume_series": [1000000] * 20,
-            "candle_body": 2.0,
+            "price": 106.0,
             "atr_val": 3.0,
+            "vol_pct": 85.0,
+            "body_ratio": 0.8,
+            "path": "TA",
+            "regime_4h": "LONG",
+            "trade_dir": "LONG",
+            "is_breakout": True
         }
         result = scanner.compute_signal_score(indicator_data, 0.02)
         expected_components = [
-            "macd_magnitude",
-            "macd_acceleration",
-            "ema_spread",
+            "persistence",
+            "delta_pct",
+            "mag_pct",
+            "ema_alignment",
+            "breakout",
+            "anti_chase",
             "volume",
-            "atr_move",
-            "btc_relative",
+            "wick_safety",
+            "context_4h",
+            "btc_rs"
         ]
         for comp in expected_components:
             assert comp in result["components"]
@@ -347,15 +372,19 @@ class TestComputeSignalScore:
     def test_strong_momentum_scores_high(self):
         """Strong indicators should produce a high score."""
         indicator_data = {
-            "macd_hist_current": 1.0,
-            "macd_hist_previous": 0.3,
-            "macd_hist_series": [0.1, 0.2, 0.3, 0.5, 1.0],
+            "persistence": 5,
+            "delta_pct": 100.0,
+            "mag_pct": 100.0,
             "ema20": 110.0,
             "ema50": 100.0,
-            "volume_current": 3000000,
-            "volume_series": [1000000] * 20,
-            "candle_body": 4.0,
+            "price": 112.0,
             "atr_val": 3.0,
+            "vol_pct": 95.0,
+            "body_ratio": 0.9,
+            "path": "TA",
+            "regime_4h": "LONG",
+            "trade_dir": "LONG",
+            "is_breakout": True
         }
         result = scanner.compute_signal_score(indicator_data, 0.05)
         assert result["composite"] >= 60
@@ -363,45 +392,57 @@ class TestComputeSignalScore:
     def test_weak_momentum_scores_low(self):
         """Weak indicators should produce a low score."""
         indicator_data = {
-            "macd_hist_current": 0.01,
-            "macd_hist_previous": 0.01,
-            "macd_hist_series": [0.5, 0.4, 0.3, 0.02, 0.01],
-            "ema20": 100.1,
+            "persistence": 1,
+            "delta_pct": 10.0,
+            "mag_pct": 10.0,
+            "ema20": 90.0,
             "ema50": 100.0,
-            "volume_current": 300000,
-            "volume_series": [1000000] * 20,
-            "candle_body": 0.1,
+            "price": 88.0,
             "atr_val": 3.0,
+            "vol_pct": 10.0,
+            "body_ratio": 0.1,
+            "path": "CT",
+            "regime_4h": "LONG",
+            "trade_dir": "SHORT",
+            "is_breakout": False
         }
         result = scanner.compute_signal_score(indicator_data, -0.05)
         assert result["composite"] <= 40
 
     def test_handles_zero_values(self):
         indicator_data = {
-            "macd_hist_current": 0,
-            "macd_hist_previous": 0,
-            "macd_hist_series": [0] * 20,
-            "ema20": 100.0,
-            "ema50": 100.0,
-            "volume_current": 0,
-            "volume_series": [0] * 20,
-            "candle_body": 0,
+            "persistence": 0,
+            "delta_pct": 0,
+            "mag_pct": 0,
+            "ema20": 0,
+            "ema50": 0,
+            "price": 0,
             "atr_val": 0,
+            "vol_pct": 0,
+            "body_ratio": 0,
+            "path": "TA",
+            "regime_4h": "LONG",
+            "trade_dir": "LONG",
+            "is_breakout": False
         }
         result = scanner.compute_signal_score(indicator_data, 0.0)
         assert 0 <= result["composite"] <= 100
 
     def test_handles_empty_series(self):
         indicator_data = {
-            "macd_hist_current": 0.5,
-            "macd_hist_previous": 0.3,
-            "macd_hist_series": [],
+            "persistence": 1,
+            "delta_pct": 50,
+            "mag_pct": 50,
             "ema20": 105.0,
             "ema50": 100.0,
-            "volume_current": 1500000,
-            "volume_series": [],
-            "candle_body": 2.0,
+            "price": 106.0,
             "atr_val": 3.0,
+            "vol_pct": 50,
+            "body_ratio": 0.5,
+            "path": "TA",
+            "regime_4h": "LONG",
+            "trade_dir": "LONG",
+            "is_breakout": True
         }
         result = scanner.compute_signal_score(indicator_data, 0.02)
         assert 0 <= result["composite"] <= 100
@@ -435,15 +476,19 @@ class TestFormatScoreDisplay:
         score_data = {
             "composite": 72,
             "components": {
-                "macd_magnitude": 80,
-                "macd_acceleration": 60,
-                "ema_spread": 50,
-                "volume": 90,
-                "atr_move": 65,
-                "btc_relative": 70,
+                "persistence": 10,
+                "delta_pct": 15,
+                "mag_pct": 8,
+                "ema_alignment": 12,
+                "breakout": 8,
+                "anti_chase": 5,
+                "volume": 10,
+                "wick_safety": 6,
+                "context_4h": 10,
+                "btc_rs": 4
             },
         }
-        result = scanner.format_score_display(score_data, 0.023)
+        result = scanner.format_score_display(score_data, 0.023, "TA")
         assert "72/100" in result
         assert "Strong" in result
         assert "█" in result

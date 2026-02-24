@@ -44,11 +44,17 @@ async def check_4h_trend(exchange, symbol):
     return None
 
 
-async def check_1h_entry(exchange, symbol, trend_direction):
-    """Check 1H entry conditions: EMA alignment + MACD cross + ATR.
-    Returns signal dict (with indicator data for scoring) or None."""
-    df = await fetch_ohlcv(exchange, symbol, "1h", limit=100)
-    if df is None or len(df) < 51:
+def calc_pct(val, arr):
+    """Calculate percentile of a value in an array (0 to 100)."""
+    if not arr: return 50.0
+    return sum(1 for x in arr if x < val) / len(arr) * 100.0
+
+
+async def check_1h_entry(exchange, symbol, regime_4h):
+    """Check 1H entry conditions: Dual Path (TA and CT).
+    Returns signal dict or None."""
+    df = await fetch_ohlcv(exchange, symbol, "1h", limit=150)
+    if df is None or len(df) < 100:
         return None
 
     df.ta.ema(length=20, append=True)
@@ -58,167 +64,172 @@ async def check_1h_entry(exchange, symbol, trend_direction):
 
     ema20 = df['EMA_20']
     ema50 = df['EMA_50']
-    macd_line = df['MACD_12_26_9']
-    macd_signal = df['MACDs_12_26_9']
     macd_hist = df['MACDh_12_26_9']
     atr = df['ATRr_14']
+    close = df['close']
+    volume = df['volume']
 
-    curr = -2  # Last closed 1H candle
-    prev = -3  # Previous closed 1H candle
+    curr = -2
+    price = close.iloc[curr]
 
-    # Check for NaN values in critical indicators
-    if any(pd.isna(x) for x in [ema20.iloc[curr], ema50.iloc[curr],
-                                   macd_line.iloc[curr], macd_signal.iloc[curr],
-                                   macd_hist.iloc[curr], atr.iloc[curr],
-                                   macd_line.iloc[prev], macd_signal.iloc[prev]]):
+    if any(pd.isna(x) for x in [ema20.iloc[curr], ema50.iloc[curr], macd_hist.iloc[curr], atr.iloc[curr]]):
         return None
 
+    hist_curr = macd_hist.iloc[curr]
+    if hist_curr > 0:
+        trade_dir = "LONG"
+        dir_mult = 1
+    elif hist_curr < 0:
+        trade_dir = "SHORT"
+        dir_mult = -1
+    else:
+        return None
+
+    path = "TA" if trade_dir == regime_4h else "CT"
+
+    hist_series = macd_hist.iloc[-52:-1].dropna().tolist()
+    if len(hist_series) < 50:
+        return None
+
+    hist_deltas = [dir_mult * (hist_series[i] - hist_series[i-1]) for i in range(1, len(hist_series))]
+    delta_curr = hist_deltas[-1]
+
+    hist_mags = [abs(x) for x in hist_series[1:]]
+    mag_curr = abs(hist_curr)
+
+    delta_pct = calc_pct(delta_curr, hist_deltas)
+    mag_pct = calc_pct(mag_curr, hist_mags)
+
+    vol_20 = volume.iloc[-22:-1].tolist()
+    vol_curr = vol_20[-1]
+    vol_pct = calc_pct(vol_curr, vol_20)
+
+    persistence = 0
+    for h in reversed(hist_series):
+        if (h > 0 and trade_dir == "LONG") or (h < 0 and trade_dir == "SHORT"):
+            persistence += 1
+        else:
+            break
+
     signal = None
+    is_breakout = False
 
-    if trend_direction == "LONG":
-        ema_aligned = ema20.iloc[curr] > ema50.iloc[curr]
-        macd_cross = (macd_line.iloc[prev] <= macd_signal.iloc[prev]) and \
-                     (macd_line.iloc[curr] > macd_signal.iloc[curr])
-        hist_confirm = macd_hist.iloc[curr] > 0
+    if trade_dir == "LONG":
+        highest_12 = close.iloc[-14:-2].max()
+        is_breakout = price >= highest_12
+    else:
+        lowest_12 = close.iloc[-14:-2].min()
+        is_breakout = price <= lowest_12
 
-        if ema_aligned and macd_cross and hist_confirm:
-            signal = "LONG"
+    if path == "TA":
+        if persistence >= 2:
+            signal = trade_dir
+    else:
+        req_persist = persistence >= 3
+        last_3_deltas = hist_deltas[-3:]
+        req_explosive = any(d >= np.percentile(hist_deltas, 90) for d in last_3_deltas) and (np.mean(last_3_deltas) >= np.percentile(hist_deltas, 70))
+        
+        req_structure = price > ema50.iloc[curr] if trade_dir == "LONG" else price < ema50.iloc[curr]
+        req_confirm = is_breakout
+        req_volume = vol_pct >= 70.0
 
-    elif trend_direction == "SHORT":
-        ema_aligned = ema20.iloc[curr] < ema50.iloc[curr]
-        macd_cross = (macd_line.iloc[prev] >= macd_signal.iloc[prev]) and \
-                     (macd_line.iloc[curr] < macd_signal.iloc[curr])
-        hist_confirm = macd_hist.iloc[curr] < 0
-
-        if ema_aligned and macd_cross and hist_confirm:
-            signal = "SHORT"
+        if req_persist and req_explosive and req_structure and req_confirm and req_volume:
+            signal = trade_dir
 
     if not signal:
         return None
 
-    price = df['close'].iloc[curr]
-    atr_val = atr.iloc[curr]
+    high_low_range = df['high'].iloc[curr] - df['low'].iloc[curr]
+    body = abs(close.iloc[curr] - df['open'].iloc[curr])
+    body_ratio = body / high_low_range if high_low_range > 0 else 0
 
-    # Collect indicator data for composite scoring
     indicator_data = {
-        "macd_hist_current": macd_hist.iloc[curr],
-        "macd_hist_previous": macd_hist.iloc[prev],
-        "macd_hist_series": macd_hist.dropna().tail(20).tolist(),
+        "persistence": persistence,
+        "delta_pct": delta_pct,
+        "mag_pct": mag_pct,
         "ema20": ema20.iloc[curr],
         "ema50": ema50.iloc[curr],
-        "volume_current": df['volume'].iloc[curr],
-        "volume_series": df['volume'].dropna().tail(20).tolist(),
-        "candle_body": abs(df['close'].iloc[curr] - df['open'].iloc[curr]),
-        "atr_val": atr_val,
+        "price": price,
+        "atr_val": atr.iloc[curr],
+        "vol_pct": vol_pct,
+        "body_ratio": body_ratio,
+        "path": path,
+        "regime_4h": regime_4h,
+        "trade_dir": trade_dir,
+        "is_breakout": is_breakout
     }
 
     return {
         "symbol": symbol,
         "signal": signal,
+        "path": path,
         "price": price,
-        "atr": atr_val,
+        "atr": atr.iloc[curr],
         "indicator_data": indicator_data,
     }
 
 
 def compute_signal_score(indicator_data, btc_relative_strength):
-    """Compute a composite signal strength score from 0-100.
-
-    Components (weighted):
-    - MACD histogram magnitude (20%): current histogram vs recent range
-    - MACD histogram acceleration (15%): growth rate of histogram
-    - EMA 20/50 spread (15%): distance between EMAs normalized by price
-    - Volume spike (20%): current volume vs 20-bar average
-    - ATR-relative price move (15%): candle body vs ATR (sharpness)
-    - Relative strength vs BTC (15%): coin performance vs BTC
-
-    Returns dict with composite score and component breakdown.
-    """
+    """Compute a composite signal strength score from 0-100 using unifying Pillars."""
     scores = {}
+    path = indicator_data["path"]
+    trade_dir = indicator_data["trade_dir"]
 
-    # 1. MACD Histogram Magnitude (20%)
-    hist_series = indicator_data.get("macd_hist_series", [])
-    hist_current = abs(indicator_data.get("macd_hist_current", 0))
-    if hist_series and len(hist_series) >= 2:
-        hist_abs = [abs(h) for h in hist_series]
-        hist_max = max(hist_abs) if max(hist_abs) > 0 else 1
-        scores["macd_magnitude"] = min(100, (hist_current / hist_max) * 100)
+    # 1. Momentum (40 pts)
+    p = indicator_data["persistence"]
+    scores["persistence"] = min(12.0, max(0.0, (p - 1) * 6.0))
+    scores["delta_pct"] = (indicator_data["delta_pct"] / 100.0) * 18.0
+    scores["mag_pct"] = (indicator_data["mag_pct"] / 100.0) * 10.0
+
+    # 2. Structure (25 pts)
+    price = indicator_data["price"]
+    ema20 = indicator_data["ema20"]
+    ema50 = indicator_data["ema50"]
+    if trade_dir == "LONG" and ema20 > ema50:
+        scores["ema_alignment"] = 12.0
+    elif trade_dir == "SHORT" and ema20 < ema50:
+        scores["ema_alignment"] = 12.0
     else:
-        scores["macd_magnitude"] = 50
+        scores["ema_alignment"] = 0.0
 
-    # 2. MACD Histogram Acceleration (15%)
-    hist_prev = abs(indicator_data.get("macd_hist_previous", 0))
-    if hist_prev > 0:
-        acceleration = (hist_current - hist_prev) / hist_prev
-        # Clamp to [-1, 3] range, map to [0, 100]
-        acceleration = max(-1, min(3, acceleration))
-        scores["macd_acceleration"] = ((acceleration + 1) / 4) * 100
-    elif hist_current > 0:
-        scores["macd_acceleration"] = 100  # From zero to positive = strong start
-    else:
-        scores["macd_acceleration"] = 50
+    scores["breakout"] = 8.0 if indicator_data["is_breakout"] else 0.0
 
-    # 3. EMA 20/50 Spread (15%)
-    ema20 = indicator_data.get("ema20", 0)
-    ema50 = indicator_data.get("ema50", 0)
-    if ema50 > 0:
-        ema_spread_pct = abs(ema20 - ema50) / ema50 * 100
-        # Typical spread: 0-5%. Map 0 → 0, 3%+ → 100
-        scores["ema_spread"] = min(100, (ema_spread_pct / 3.0) * 100)
-    else:
-        scores["ema_spread"] = 50
-
-    # 4. Volume Spike (20%)
-    vol_series = indicator_data.get("volume_series", [])
-    vol_current = indicator_data.get("volume_current", 0)
-    if vol_series and len(vol_series) >= 2:
-        vol_avg = sum(vol_series) / len(vol_series)
-        if vol_avg > 0:
-            vol_ratio = vol_current / vol_avg
-            # 1.0 = average (score 50), 2.0+ = high (score 100)
-            scores["volume"] = min(100, max(0, (vol_ratio - 0.5) / 1.5 * 100))
+    atr = indicator_data["atr_val"]
+    dist = abs(price - ema20)
+    if atr > 0:
+        chase_ratio = dist / atr
+        if chase_ratio <= 1.0:
+            scores["anti_chase"] = 5.0
+        elif chase_ratio <= 1.5:
+            scores["anti_chase"] = 5.0 - ((chase_ratio - 1.0) * 10.0)
         else:
-            scores["volume"] = 50
+            scores["anti_chase"] = 0.0
     else:
-        scores["volume"] = 50
+        scores["anti_chase"] = 0.0
 
-    # 5. ATR-relative Price Move (15%)
-    candle_body = indicator_data.get("candle_body", 0)
-    atr_val = indicator_data.get("atr_val", 0)
-    if atr_val > 0:
-        body_atr_ratio = candle_body / atr_val
-        # 0.5 ATR body = moderate (50), 1.5+ ATR body = very sharp (100)
-        scores["atr_move"] = min(100, max(0, (body_atr_ratio / 1.5) * 100))
-    else:
-        scores["atr_move"] = 50
+    # 3. Cleanliness (20 pts)
+    scores["volume"] = (indicator_data["vol_pct"] / 100.0) * 12.0
+    scores["wick_safety"] = indicator_data["body_ratio"] * 8.0
 
-    # 6. Relative Strength vs BTC (15%)
-    # btc_relative_strength is typically -0.10 to +0.10
+    # 4. Context (15 pts)
+    regime_4h = indicator_data["regime_4h"]
+    scores["context_4h"] = 10.0 if trade_dir == regime_4h else 0.0
+
     rs = btc_relative_strength
-    # Map: -5% → 0, 0% → 50, +5% → 100
-    scores["btc_relative"] = min(100, max(0, (rs + 0.05) / 0.10 * 100))
+    if trade_dir == "SHORT":
+        rs = -rs
+    rs_clamped = min(0.05, max(-0.05, rs))
+    scores["btc_rs"] = ((rs_clamped + 0.05) / 0.10) * 5.0
 
-    # Weighted composite
-    weights = {
-        "macd_magnitude": 0.20,
-        "macd_acceleration": 0.15,
-        "ema_spread": 0.15,
-        "volume": 0.20,
-        "atr_move": 0.15,
-        "btc_relative": 0.15,
-    }
-
-    composite = sum(scores[k] * weights[k] for k in weights)
-    composite = round(min(100, max(0, composite)))
-
+    total_score = sum(scores.values())
+    
     return {
-        "composite": composite,
-        "components": scores,
+        "composite": round(min(100, max(0, total_score))),
+        "components": scores
     }
 
 
 def format_score_label(composite):
-    """Return a human-readable label for the composite score."""
     if composite >= 80:
         return "🔥 Very Strong"
     elif composite >= 60:
@@ -231,48 +242,43 @@ def format_score_label(composite):
         return "❄️ Very Weak"
 
 
-def _make_bar(value, width=10):
-    """Create a visual bar chart: ███████░░░"""
-    filled = round(value / 100 * width)
+def _make_bar(value, max_val, width=10):
+    filled = round((value / max_val) * width) if max_val > 0 else 0
+    filled = min(width, max(0, filled))
     return "█" * filled + "░" * (width - filled)
 
 
-def format_score_display(score_data, btc_relative):
-    """Format the score display for Telegram alert messages."""
+def format_score_display(score_data, btc_relative, path):
     composite = score_data["composite"]
     c = score_data["components"]
     label = format_score_label(composite)
 
     btc_pct = btc_relative * 100
     btc_sign = "+" if btc_pct >= 0 else ""
+    
+    momentum_pts = c['persistence'] + c['delta_pct'] + c['mag_pct']
 
     return (
         f"Score: {composite}/100 ({label})\n"
-        f"  MACD: {_make_bar(c['macd_magnitude'])} | "
-        f"Vol: {_make_bar(c['volume'])} | "
+        f"  Momntm: {_make_bar(momentum_pts, 40)} | "
+        f"Struc: {_make_bar(c['ema_alignment'] + c['breakout'] + c['anti_chase'], 25)} \n"
+        f"  Clean:  {_make_bar(c['volume'] + c['wick_safety'], 20)} | "
         f"vs BTC: {btc_sign}{btc_pct:.1f}%"
     )
 
 
 async def get_btc_pct_change(exchange):
-    """Calculate BTC % change over the last 4 hours using 1H candles."""
     df = await fetch_ohlcv(exchange, "BTC/USDT", "1h", limit=10)
     if df is None or len(df) < 6:
         return 0.0
     close = df['close']
     curr = -2
-    base_idx = curr - 4  # 4 hours back
+    base_idx = curr - 4
     return (close.iloc[curr] - close.iloc[base_idx]) / close.iloc[base_idx]
 
 
 async def scan_market():
-    """Run full market scan.
-
-    Returns a dict with:
-    - signals: list of signal dicts (max 10)
-    - metadata: scan statistics for summary messages
-    """
-    logger.info("Starting 1H/4H swing scan...")
+    logger.info("Starting 1H/4H swing scan (Hybrid)...")
     pairs_file = os.path.join(os.path.dirname(__file__), "pairs.txt")
     if not os.path.exists(pairs_file):
         logger.error("pairs.txt not found.")
@@ -285,21 +291,18 @@ async def scan_market():
 
     try:
         btc_pct = await get_btc_pct_change(exchange)
-        logger.info(f"Analyzing {len(symbols)} pairs (4H trend + 1H MACD entry)...")
+        logger.info(f"Analyzing {len(symbols)} pairs (4H Regime + 1H Entry)...")
 
-        # Step 1: Check 4H trend for all pairs in parallel
         trend_tasks = [check_4h_trend(exchange, symbol) for symbol in symbols]
         trend_results = await asyncio.gather(*trend_tasks)
 
-        # Build list of pairs that pass the 4H filter
         filtered_pairs = []
         for symbol, trend in zip(symbols, trend_results):
             if trend is not None:
                 filtered_pairs.append((symbol, trend))
 
-        logger.info(f"{len(filtered_pairs)} pairs pass 4H EMA 200 trend filter.")
+        logger.info(f"{len(filtered_pairs)} pairs passed 4H EMA 200 regime filter.")
 
-        # Step 2: Check 1H entry for filtered pairs in parallel
         entry_tasks = [check_1h_entry(exchange, sym, trend) for sym, trend in filtered_pairs]
         entry_results = await asyncio.gather(*entry_tasks)
 
@@ -309,7 +312,6 @@ async def scan_market():
                 sym = filtered_pairs[i][0]
                 mc_rank = symbols.index(sym) if sym in symbols else i
 
-                # Fetch coin's 4h pct change for relative strength
                 coin_df = await fetch_ohlcv(exchange, sym, "1h", limit=10)
                 if coin_df is not None and len(coin_df) >= 6:
                     close = coin_df['close']
@@ -321,19 +323,26 @@ async def scan_market():
                 res['btc_relative'] = btc_relative
                 res['mc_rank'] = mc_rank
 
-                # Compute composite score
                 indicator_data = res.pop("indicator_data", {})
                 score_data = compute_signal_score(indicator_data, btc_relative)
+                
                 res['score'] = score_data["composite"]
                 res['score_data'] = score_data
-                res['score_display'] = format_score_display(score_data, btc_relative)
+                res['score_display'] = format_score_display(score_data, btc_relative, res['path'])
+
+                # Log the strict requirement formatting
+                logger.info(
+                    f"[{sym}] Path: {res['path']} | "
+                    f"Hist_Delta_Pct: {indicator_data['delta_pct']:.1f} | "
+                    f"Volume_Pct: {indicator_data['vol_pct']:.1f} | "
+                    f"Total_Score: {res['score']}"
+                )
 
                 signals.append(res)
 
-        # Sort by composite score desc, then market cap rank
         signals.sort(key=lambda x: (-x['score'], x['mc_rank']))
 
-        logger.info(f"Scan complete. Found {len(signals)} signals matching 4H trend + 1H MACD entry.")
+        logger.info(f"Scan complete. Found {len(signals)} matching signals.")
 
         metadata = {
             "pairs_scanned": len(symbols),
@@ -347,6 +356,5 @@ async def scan_market():
         await exchange.close()
 
 
-# test block
 if __name__ == "__main__":
     asyncio.run(scan_market())

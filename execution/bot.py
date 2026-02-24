@@ -111,14 +111,17 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
         order_size_usd = balance * POSITION_SIZE_PCT
         coin_qty = math.floor(order_size_usd / price) if price > 0 else 0
 
+        path = sig.get('path', 'TA')
+        path_label = "[TREND]" if path == "TA" else "[COUNTERTREND]"
+
         keyboard = [
-            [InlineKeyboardButton("✅ Opened", callback_data=f"open_{side}_{symbol}_{atr_val:.4f}"),
+            [InlineKeyboardButton("✅ Opened", callback_data=f"open_{side}_{symbol}_{atr_val:.4f}_{path}"),
              InlineKeyboardButton("❌ Ignore", callback_data=f"ignore_{symbol}")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         text = (
-            f"🚨 **ACTION REQUIRED: {side} Signal** 🚨\n"
+            f"🚨 **ACTION REQUIRED: {path_label} {side} Signal** 🚨\n"
             f"Symbol: {symbol}\n"
             f"{score_display}\n"
             f"Entry Price: {fmt_price(price)}\n"
