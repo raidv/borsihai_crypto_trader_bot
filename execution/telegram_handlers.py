@@ -140,6 +140,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/scan` - Run a market scan immediately\n"
         "• `/restart` - Restart the bot service\n"
         "• `/start` - Re-register the monitoring loop\n"
+        "• `/sl <coin> <price>` - Manually update SL for an open position\n"
+        "• `/long <coin>` - Manually open a LONG position\n"
+        "• `/short <coin>` - Manually open a SHORT position\n"
+        "• `/close <coin> [price]` - Manually close a position\n"
+        "• `/clean` - Clear un-interacted alerts from bot memory\n"
         "• `/help` - This message"
     )
     if newly_registered:

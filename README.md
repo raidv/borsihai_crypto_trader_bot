@@ -25,7 +25,9 @@ The bot implements a robust **Hybrid** swing strategy:
 - **Composite Scoring:** Visual bar charts in Telegram for signal strength evaluation.
 - **Smart Deduplication:** Prevents spamming the same signal multiple times.
 - **AFK Mode (`/afk`):** Pauses new signals and gives you "safety net" SL/TP levels to set manually while you sleep or are away.
-- **Multi-Position Tracking:** Tracks up to 10 open positions simultaneously, managing capital allocation and simulated PnL.
+- **Dynamic TP Tracking:** Automatically tracks TP2, TP3, etc. notifying you to raise SL to lock in profits.
+- **Manual Control:** Full suite of commands to manually open (`/long`, `/short`), close (`/close`), and adjust Stop Loss (`/sl`) on positions.
+- **Multi-Position Tracking:** Tracks any number of open positions simultaneously, managing capital allocation and simulated PnL.
 - **Robust Persistence:** Atomic JSON state saving ensures your portfolio data survives reboots.
 
 ## Project Structure
@@ -76,11 +78,16 @@ Once the service is running, open Telegram and message your bot:
 ## Telegram Commands
 
 - `/start` - Activate monitoring loops.
-- `/status` - View portfolio equity, available cash, and detailed status (Entry, SL, TP1) of all open positions.
+- `/status` - View portfolio equity, available cash, and detailed status (Entry, SL, TP) of all open positions.
 - `/afk` - Pause scanning and receive safety stop-loss/take-profit levels for all open positions.
 - `/ready` - Resume active signal scanning.
-- `/scan` - Force an immediate market scan and receive a detailed summary (Pairs scanned, Alerts sent, Alerts discarded).
-- `/restart` - Restarts the underlying systemd service (requires sudo privileges configured for the bot user).
+- `/scan` - Force an immediate market scan and receive a detailed summary.
+- `/restart` - Restarts the underlying systemd service.
+- `/sl <coin> <price>` - Manually update the Stop Loss for an open position.
+- `/long <coin>` - Manually open a LONG position with dynamic ATR risk.
+- `/short <coin>` - Manually open a SHORT position with dynamic ATR risk.
+- `/close <coin> [price]` - Manually close a position.
+- `/clean` - Clear un-interacted alerts from bot memory to unblock signals.
 - `/help` - Show the help manual.
 
 ## Development & Testing
