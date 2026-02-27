@@ -321,10 +321,48 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _handle_sl_open(query, data, state)
         elif data.startswith("halfclose_"):
             await _handle_half_close(query, data, state)
+        elif data.startswith("slraised_"):
+            await _handle_sl_raised(query, data, state)
     except Exception as e:
         await update.message.reply_text(f"❌ Error handling button: {e}")
     finally:
         await exchange.close()
+
+
+async def update_sl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually update the Stop Loss for a position. Usage: /sl <symbol> <price>"""
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Usage: /sl <symbol> <price>\nExample: /sl SOL 150.5")
+        return
+        
+    symbol = args[0].upper()
+    if "/" not in symbol and not symbol.endswith("USDT"):
+        symbol += "/USDT"
+        
+    try:
+        new_sl = float(args[1])
+    except ValueError:
+        await update.message.reply_text(f"❌ Invalid price format: {args[1]}")
+        return
+        
+    state = load_state()
+    positions = state.get("active_positions", [])
+    
+    updated = False
+    for p in positions:
+        if p["symbol"].upper() == symbol:
+            p["current_sl"] = new_sl
+            updated = True
+            break
+            
+    if not updated:
+        await update.message.reply_text(f"❌ Could not find an open position for {symbol}.")
+        return
+        
+    state["active_positions"] = positions
+    save_state(state)
+    await update.message.reply_text(f"✅ Stop Loss for {symbol} updated to {fmt_price(new_sl)}.")
 
 
 async def clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -630,8 +668,19 @@ async def _handle_half_close(query, data, state):
             state['available_cash'] = state.get('available_cash', 0) + half_alloc + pnl
             state['tied_capital'] = max(0.0, state.get('tied_capital', 0.0) - half_alloc)
 
+            from config import TP_STEP_RR
             p['allocated_capital'] = half_alloc
             p['current_sl'] = be_sl
+            
+            # Initiate dynamic TP tracking for the remaining 50%
+            initial_risk = p.get('initial_risk', entry * 0.04)
+            if side == "LONG":
+                p['next_tp_price'] = tp1 + (initial_risk * TP_STEP_RR)
+                p['prev_tp_price'] = tp1
+            else:
+                p['next_tp_price'] = tp1 - (initial_risk * TP_STEP_RR)
+                p['prev_tp_price'] = tp1
+            p['next_tp_level'] = 2
 
             log_trade("PARTIAL_CLOSE", symbol, side, entry, tp1, datetime.now(timezone.utc).timestamp(), pnl)
 
@@ -639,5 +688,29 @@ async def _handle_half_close(query, data, state):
     save_state(state)
     await query.edit_message_text(
         f"⚡ TP1 half-close confirmed for {symbol}.\n"
-        f"SL moved to break-even. Remaining 50% running — will alert on MACD exit."
+        f"SL moved to break-even. Remaining 50% running — will alert on TP2 or MACD exit."
     )
+
+
+async def _handle_sl_raised(query, data, state):
+    """Process SL Raised confirmation."""
+    _, symbol = data.split("_", 1)
+    positions = state.get("active_positions", [])
+
+    for p in positions:
+        if p['symbol'] == symbol:
+            side = p.get('side', 'LONG')
+            new_sl = p.get('prev_tp_price', p['entry_price'])
+            p['current_sl'] = new_sl
+            lvl = p.get('next_tp_level', 3) - 1
+            
+            state["active_positions"] = positions
+            save_state(state)
+            
+            await query.edit_message_text(
+                f"✅ SL Raised for {symbol} to {fmt_price(new_sl)}.\n"
+                f"Continuing to ride trend... we will notify if TP{lvl+1} is hit at {fmt_price(p.get('next_tp_price', 0))}."
+            )
+            return
+
+    await query.edit_message_text(f"❌ Could not find active position for {symbol}.")

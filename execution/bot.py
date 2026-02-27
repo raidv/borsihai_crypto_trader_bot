@@ -200,7 +200,7 @@ def main():
         except Exception:
             pass
 
-    from telegram_handlers import clean, close_position, manual_long, manual_short
+    from telegram_handlers import clean, close_position, manual_long, manual_short, update_sl
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
@@ -214,6 +214,7 @@ def main():
     application.add_handler(CommandHandler("close", close_position))
     application.add_handler(CommandHandler("long", manual_long))
     application.add_handler(CommandHandler("short", manual_short))
+    application.add_handler(CommandHandler("sl", update_sl))
     application.add_handler(CallbackQueryHandler(button_handler))
 
     application.add_error_handler(error_handler)

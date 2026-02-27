@@ -177,6 +177,39 @@ async def _check_position(context, p, tickers, candles_5m, macd_dfs):
                 reply_markup=reply_markup
             )
             return
+            
+    # ── Check Next TP levels (if TP1 was hit) ──
+    next_tp = p.get('next_tp_price')
+    if tp1_hit and next_tp:
+        tp_reached = _check_tp1(side, current_price, next_tp, candles_5m.get(symbol))
+        if tp_reached:
+            lvl = p.get('next_tp_level', 2)
+            
+            from config import TP_STEP_RR
+            initial_risk = p.get('initial_risk', entry * 0.04)
+            p['prev_tp_price'] = next_tp
+            if side == "LONG":
+                p['next_tp_price'] = next_tp + (initial_risk * TP_STEP_RR)
+            else:
+                p['next_tp_price'] = next_tp - (initial_risk * TP_STEP_RR)
+            p['next_tp_level'] = lvl + 1
+            
+            keyboard = [
+                [InlineKeyboardButton("✅ SL Raised", callback_data=f"slraised_{symbol}"),
+                 InlineKeyboardButton("❌ Ignore", callback_data=f"slopen_{symbol}")] # slopen will just say 'kept open'
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await context.bot.send_message(
+                chat_id=context.job.chat_id,
+                text=(
+                    f"🎯 **Next TP Level (TP{lvl}) Reached** for {symbol} at {fmt_price(next_tp)}!\n"
+                    f"Current price: {fmt_price(current_price)}\n"
+                    f"Consider raising your Stop Loss to lock in profits."
+                ),
+                reply_markup=reply_markup
+            )
+            return
 
     # ── MACD momentum exit & CT Momentum Fade ──
     path = p.get('path', 'TA')

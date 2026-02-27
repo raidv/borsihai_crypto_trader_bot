@@ -144,3 +144,49 @@ async def test_manual_long():
         pos = state["active_positions"][0]
         assert pos["symbol"] == "SOL/USDT"
         assert pos["side"] == "LONG"
+
+@pytest.mark.asyncio
+async def test_update_sl():
+    from telegram_handlers import update_sl
+    update = AsyncMock()
+    context = AsyncMock()
+    context.args = ["SOL", "145.0"]
+    state = {
+        "active_positions": [
+            {"symbol": "SOL/USDT", "side": "LONG", "current_sl": 140.0}
+        ]
+    }
+    with patch("telegram_handlers.load_state", return_value=state),\
+         patch("telegram_handlers.save_state") as mock_save:
+         
+        await update_sl(update, context)
+        assert state["active_positions"][0]["current_sl"] == 145.0
+        mock_save.assert_called_once()
+        update.message.reply_text.assert_called_with("✅ Stop Loss for SOL/USDT updated to $145.00.")
+
+@pytest.mark.asyncio
+async def test_handle_sl_raised():
+    from telegram_handlers import _handle_sl_raised
+    query = AsyncMock()
+    data = "slraised_SOL/USDT"
+    state = {
+        "active_positions": [
+            {
+                "symbol": "SOL/USDT", 
+                "side": "LONG", 
+                "entry_price": 100.0,
+                "current_sl": 100.2, # BE SL
+                "prev_tp_price": 110.0, # TP1
+                "next_tp_price": 115.0, # TP2
+                "next_tp_level": 3
+            }
+        ]
+    }
+    with patch("telegram_handlers.save_state") as mock_save:
+        await _handle_sl_raised(query, data, state)
+        pos = state["active_positions"][0]
+        assert pos["current_sl"] == 110.0 # raised to prev TP
+        assert pos["prev_tp_price"] == 110.0 # unchanged by button handler
+        assert pos["next_tp_price"] == 115.0 # unchanged by button handler
+        mock_save.assert_called_once()
+        query.edit_message_text.assert_called_once()

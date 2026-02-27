@@ -17,6 +17,7 @@ MAX_POSITIONS = 10
 POSITION_SIZE_PCT = 0.10       # 10% of portfolio per position
 ATR_MULTIPLIER = 2.0           # SL = Entry +/- (ATR * 2.0)
 TP1_RR_RATIO = 1.5             # TP1 at 1.5x risk
+TP_STEP_RR = 1.0               # Subsequent TP increments (e.g. TP2 = TP1 + 1.0R)
 DEFAULT_PORTFOLIO_BALANCE = 25000.0
 
 # ─── Logging Setup ────────────────────────────────────────────────────
