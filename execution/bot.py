@@ -187,13 +187,20 @@ def main():
         try:
             state = load_state()
             chat_id = state.get("chat_id")
-            if chat_id:
+            if update and getattr(update, "callback_query", None):
+                await update.callback_query.answer(
+                    text=f"⚠️ Bot error occurred: {context.error}",
+                    show_alert=True
+                )
+            elif chat_id:
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"⚠️ Bot error occurred:\n{context.error}"
                 )
         except Exception:
             pass
+
+    from telegram_handlers import clean, close_position, manual_long, manual_short
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
@@ -202,6 +209,11 @@ def main():
     application.add_handler(CommandHandler("scan", scan))
     application.add_handler(CommandHandler("restart", restart))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("clean", clean))
+    application.add_handler(CommandHandler("ignore", clean))
+    application.add_handler(CommandHandler("close", close_position))
+    application.add_handler(CommandHandler("long", manual_long))
+    application.add_handler(CommandHandler("short", manual_short))
     application.add_handler(CallbackQueryHandler(button_handler))
 
     application.add_error_handler(error_handler)

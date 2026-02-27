@@ -75,3 +75,72 @@ async def test_ignore_button_clears_sent_signal():
                 
                 # Verify message was updated
                 query.edit_message_text.assert_called_once_with("❌ Ignored signal.")
+
+@pytest.mark.asyncio
+async def test_clean_command():
+    from telegram_handlers import clean
+    update = AsyncMock()
+    context = AsyncMock()
+    state = {
+        "sent_signals": {"A": "1", "B": "2"}
+    }
+    with patch("telegram_handlers.load_state", return_value=state):
+        with patch("telegram_handlers.save_state") as mock_save:
+            await clean(update, context)
+            assert len(state["sent_signals"]) == 0
+            mock_save.assert_called_once()
+            update.message.reply_text.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_close_position():
+    from telegram_handlers import close_position
+    update = AsyncMock()
+    context = AsyncMock()
+    context.args = ["SOL"]
+    state = {
+        "active_positions": [
+            {"symbol": "SOL/USDT", "side": "LONG"},
+        ]
+    }
+    with patch("telegram_handlers.load_state", return_value=state),\
+         patch("telegram_handlers.save_state") as mock_save,\
+         patch("state_manager.log_trade") as mock_log,\
+         patch("telegram_handlers.ccxt.binance") as mock_binance:
+        
+        exchange = AsyncMock()
+        exchange.fetch_ticker.return_value = {"last": 150.0}
+        mock_binance.return_value = exchange
+        
+        await close_position(update, context)
+        assert len(state["active_positions"]) == 0
+        mock_save.assert_called_once()
+        mock_log.assert_called_once()
+        update.message.reply_text.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_manual_long():
+    from telegram_handlers import manual_long
+    update = AsyncMock()
+    context = AsyncMock()
+    context.args = ["SOL"]
+    state = {
+        "portfolio_balance": 1000.0,
+        "available_cash": 1000.0,
+        "active_positions": []
+    }
+    
+    with patch("telegram_handlers.load_state", return_value=state),\
+         patch("telegram_handlers.save_state") as mock_save,\
+         patch("state_manager.log_trade"),\
+         patch("telegram_handlers.ccxt.binance") as mock_binance:
+         
+        exchange = AsyncMock()
+        exchange.fetch_ticker.return_value = {"last": 150.0}
+        mock_binance.return_value = exchange
+        
+        # Test the fallback ATR logic if pandas fails or fetch_ohlcv fails
+        await manual_long(update, context)
+        assert len(state["active_positions"]) == 1
+        pos = state["active_positions"][0]
+        assert pos["symbol"] == "SOL/USDT"
+        assert pos["side"] == "LONG"

@@ -98,10 +98,13 @@ async def afk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             curr_price = ticker['last']
 
             if p.get('side', 'LONG') == 'LONG':
-                afk_sl = curr_price * 0.96
+                afk_sl_calc = curr_price * 0.96
+                afk_sl = max(p.get('current_sl', 0.0), afk_sl_calc)
                 afk_tp = curr_price * 1.10
             else:
-                afk_sl = curr_price * 1.04
+                afk_sl_calc = curr_price * 1.04
+                orig_sl = p.get('current_sl', float('inf'))
+                afk_sl = min(orig_sl, afk_sl_calc)
                 afk_tp = curr_price * 0.90
 
             msg += f"\n- **{p['symbol']}** ({p.get('side', 'LONG')}):\n"
@@ -319,9 +322,173 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("halfclose_"):
             await _handle_half_close(query, data, state)
     except Exception as e:
-        logger.error(f"Error handling button: {e}")
+        await update.message.reply_text(f"❌ Error handling button: {e}")
     finally:
         await exchange.close()
+
+
+async def clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear sent_signals from state.json."""
+    state = load_state()
+    sent_signals = state.get("sent_signals", {})
+    count = len(sent_signals)
+    state["sent_signals"] = {}
+    save_state(state)
+    await update.message.reply_text(f"🧹 Cleaned up {count} un-interacted alerts. Future signals are now unblocked.")
+
+
+async def close_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Close a position manually. Usage: /close <symbol> [price]"""
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /close <symbol> [price]\nExample: /close SOL or /close sol 150.5")
+        return
+    
+    symbol = args[0].upper()
+    if "/" not in symbol and not symbol.endswith("USDT"):
+        symbol += "/USDT"
+        
+    price_arg = args[1] if len(args) > 1 else None
+    
+    state = load_state()
+    positions = state.get("active_positions", [])
+    
+    target_pos = None
+    target_idx = -1
+    for i, p in enumerate(positions):
+        if p["symbol"].upper() == symbol:
+            target_pos = p
+            target_idx = i
+            break
+            
+    if not target_pos:
+        await update.message.reply_text(f"❌ Position not found for {symbol}.")
+        return
+        
+    price = 0.0
+    if price_arg:
+        try:
+            price = float(price_arg)
+        except ValueError:
+            await update.message.reply_text(f"❌ Invalid price format: {price_arg}")
+            return
+    else:
+        exchange = ccxt.binance()
+        try:
+            ticker = await exchange.fetch_ticker(target_pos["symbol"])
+            price = ticker['last']
+        except Exception as e:
+            await update.message.reply_text(f"❌ Could not fetch market price for {symbol}: {e}")
+            await exchange.close()
+            return
+        finally:
+            await exchange.close()
+            
+    from state_manager import log_trade
+    log_trade("CLOSE", target_pos["symbol"], target_pos["side"], price, 0.0, datetime.now(timezone.utc).timestamp())
+    
+    del positions[target_idx]
+    state["active_positions"] = positions
+    save_state(state)
+    
+    await update.message.reply_text(f"✅ Closed {target_pos['side']} on {target_pos['symbol']} at {fmt_price(price)}.")
+
+
+async def _manual_position(update: Update, context: ContextTypes.DEFAULT_TYPE, side: str):
+    args = context.args
+    if not args:
+        await update.message.reply_text(f"Usage: /{side.lower()} <symbol>\nExample: /{side.lower()} SOL")
+        return
+        
+    symbol = args[0].upper()
+    if "/" not in symbol and not symbol.endswith("USDT"):
+        symbol += "/USDT"
+        
+    state = load_state()
+    exchange = ccxt.binance()
+    
+    try:
+        from config import DEFAULT_PORTFOLIO_BALANCE, POSITION_SIZE_PCT, ATR_MULTIPLIER, TP1_RR_RATIO
+        ticker = await exchange.fetch_ticker(symbol)
+        price = ticker['last']
+        
+        # Calculate ATR for dynamic risk
+        atr_val = 0.0
+        try:
+            import pandas as pd
+            import pandas_ta as ta
+            from scanner import fetch_ohlcv
+            df = await fetch_ohlcv(exchange, symbol, "1h", limit=50)
+            if df is not None and len(df) >= 15:
+                df.ta.atr(length=14, append=True)
+                val = df['ATRr_14'].dropna()
+                if not val.empty:
+                    atr_val = val.iloc[-1]
+        except Exception as atr_err:
+            logger.warning(f"Failed to calculate ATR for {symbol}, falling back to 4%: {atr_err}")
+
+        initial_risk = ATR_MULTIPLIER * atr_val if atr_val > 0 else price * 0.04
+        
+        if side == "LONG":
+            sl = price - initial_risk
+            tp1 = price + (initial_risk * TP1_RR_RATIO)
+        else:
+            sl = price + initial_risk
+            tp1 = price - (initial_risk * TP1_RR_RATIO)
+            
+        balance = state.get("portfolio_balance", DEFAULT_PORTFOLIO_BALANCE)
+        available_cash = state.get("available_cash", balance)
+        allocated_capital = balance * POSITION_SIZE_PCT
+        
+        warning_msg = ""
+        if available_cash < allocated_capital:
+            warning_msg = f"\n⚠️ Warning: Not enough available cash (${available_cash:.2f})."
+            
+        state["available_cash"] = available_cash - allocated_capital
+        state["tied_capital"] = state.get("tied_capital", 0.0) + allocated_capital
+        
+        coin_qty = math.floor(allocated_capital / price) if price > 0 else 0
+        
+        positions = state.get("active_positions", [])
+        positions.append({
+            "symbol": symbol,
+            "side": side,
+            "path": "MANUAL",
+            "entry_price": price,
+            "allocated_capital": allocated_capital,
+            "initial_risk": initial_risk,
+            "current_sl": sl,
+            "tp1_price": tp1,
+            "tp1_hit": False,
+            "timestamp": datetime.now(timezone.utc).timestamp(),
+            "denial_count": 0
+        })
+        state["active_positions"] = positions
+        save_state(state)
+        
+        from state_manager import log_trade
+        log_trade("OPEN", symbol, side, price, sl, datetime.now(timezone.utc).timestamp())
+        
+        await update.message.reply_text(
+            f"✅ Opened {side} on {symbol}\n"
+            f"Entry: {fmt_price(price)}\n"
+            f"SL: {fmt_price(sl)}\n"
+            f"TP1: {fmt_price(tp1)}\n"
+            f"Size: ${allocated_capital:.2f} ({coin_qty} coins){warning_msg}"
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error opening {symbol}: {e}")
+    finally:
+        await exchange.close()
+
+
+async def manual_long(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _manual_position(update, context, "LONG")
+
+
+async def manual_short(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _manual_position(update, context, "SHORT")
 
 
 async def _handle_open(query, data, state, exchange):
@@ -333,19 +500,18 @@ async def _handle_open(query, data, state, exchange):
     path = parts[4] if len(parts) > 4 else "TA"
 
     positions = state.get("active_positions", [])
-    if len(positions) >= MAX_POSITIONS:
-        await query.edit_message_text(f"Cannot open {symbol}: Max {MAX_POSITIONS} positions reached.")
-        return
 
     ticker = await exchange.fetch_ticker(symbol)
     price = ticker['last']
+    balance = state.get("portfolio_balance", 25000.0) # Fallback, override using actual config below 
+    from config import DEFAULT_PORTFOLIO_BALANCE, ATR_MULTIPLIER, TP1_RR_RATIO, POSITION_SIZE_PCT
     balance = state.get("portfolio_balance", DEFAULT_PORTFOLIO_BALANCE)
     available_cash = state.get("available_cash", balance)
     allocated_capital = balance * POSITION_SIZE_PCT
 
+    warning_msg = ""
     if available_cash < allocated_capital:
-        await query.edit_message_text(f"Cannot open {symbol}: Not enough available cash (${available_cash:.2f}).")
-        return
+        warning_msg = f"\n⚠️ Warning: Not enough available cash (${available_cash:.2f})."
 
     state["available_cash"] = available_cash - allocated_capital
     state["tied_capital"] = state.get("tied_capital", 0.0) + allocated_capital
@@ -389,7 +555,7 @@ async def _handle_open(query, data, state, exchange):
         f"Entry: {fmt_price(price)}\n"
         f"SL: {fmt_price(sl)}\n"
         f"TP1: {fmt_price(tp1)}\n"
-        f"Size: ${allocated_capital:.2f} ({coin_qty} coins)"
+        f"Size: ${allocated_capital:.2f} ({coin_qty} coins){warning_msg}"
     )
 
 

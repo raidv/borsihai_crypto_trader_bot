@@ -260,9 +260,9 @@ def format_score_display(score_data, btc_relative, path):
 
     return (
         f"Score: {composite}/100 ({label})\n"
-        f"  Momntm: {_make_bar(momentum_pts, 40)} | "
-        f"Struc: {_make_bar(c['ema_alignment'] + c['breakout'] + c['anti_chase'], 25)} \n"
-        f"  Clean:  {_make_bar(c['volume'] + c['wick_safety'], 20)} | "
+        f"Momntm: {_make_bar(momentum_pts, 40)}\n"
+        f"Struc: {_make_bar(c['ema_alignment'] + c['breakout'] + c['anti_chase'], 25)}\n"
+        f"Clean: {_make_bar(c['volume'] + c['wick_safety'], 20)}\n"
         f"vs BTC: {btc_sign}{btc_pct:.1f}%"
     )
 
