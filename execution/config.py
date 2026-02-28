@@ -13,7 +13,7 @@ SYSTEMD_SERVICE_NAME = os.getenv("SYSTEMD_SERVICE_NAME", "borsihai")
 
 # ─── Trading Constants ────────────────────────────────────────────────
 
-MAX_POSITIONS = 10
+MAX_POSITIONS = 5
 POSITION_SIZE_PCT = 0.10       # 10% of portfolio per position
 ATR_MULTIPLIER = 2.0           # SL = Entry +/- (ATR * 2.0)
 TP1_RR_RATIO = 1.5             # TP1 at 1.5x risk
