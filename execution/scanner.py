@@ -1,4 +1,4 @@
-"""Market scanner — 4H/1H swing strategy with composite signal scoring."""
+"""Market scanner — configurable-timeframe swing strategy with composite signal scoring."""
 import asyncio
 import ccxt.async_support as ccxt
 import pandas as pd
@@ -6,6 +6,8 @@ import pandas_ta as ta
 import numpy as np
 import logging
 import os
+
+from config import DEFAULT_TIMEFRAME, TIMEFRAME_PAIRINGS
 
 logger = logging.getLogger(__name__)
 
@@ -22,15 +24,15 @@ async def fetch_ohlcv(exchange, symbol, timeframe, limit=100):
         return None
 
 
-async def check_4h_trend(exchange, symbol):
-    """Check 4H EMA 200 trend filter. Returns 'LONG', 'SHORT', or None."""
-    df = await fetch_ohlcv(exchange, symbol, "4h", limit=210)
+async def check_trend(exchange, symbol, trend_tf="4h"):
+    """Check EMA 200 trend filter on the given trend timeframe. Returns 'LONG', 'SHORT', or None."""
+    df = await fetch_ohlcv(exchange, symbol, trend_tf, limit=210)
     if df is None or len(df) < 201:
         return None
 
     df.ta.ema(length=200, append=True)
 
-    curr = -2  # Last closed 4H candle
+    curr = -2  # Last closed candle
     price = df['close'].iloc[curr]
     ema200 = df['EMA_200'].iloc[curr]
 
@@ -44,6 +46,11 @@ async def check_4h_trend(exchange, symbol):
     return None
 
 
+# Keep old name as alias for backward compatibility
+async def check_4h_trend(exchange, symbol):
+    return await check_trend(exchange, symbol, "4h")
+
+
 def calc_pct(val, arr):
     """Calculate percentile of a value in an array (0 to 100)."""
     if not arr: return 50.0
@@ -51,9 +58,13 @@ def calc_pct(val, arr):
 
 
 async def check_1h_entry(exchange, symbol, regime_4h):
-    """Check 1H entry conditions: Dual Path (TA and CT).
-    Returns signal dict or None."""
-    df = await fetch_ohlcv(exchange, symbol, "1h", limit=150)
+    """Backward-compat wrapper — calls _check_entry_impl with 1h timeframe."""
+    return await _check_entry_impl(exchange, symbol, regime_4h, entry_tf="1h")
+
+
+async def _check_entry_impl(exchange, symbol, regime, entry_tf):
+    """Internal implementation of entry check (timeframe-aware)."""
+    df = await fetch_ohlcv(exchange, symbol, entry_tf, limit=150)
     if df is None or len(df) < 100:
         return None
 
@@ -85,7 +96,7 @@ async def check_1h_entry(exchange, symbol, regime_4h):
     else:
         return None
 
-    path = "TA" if trade_dir == regime_4h else "CT"
+    path = "TA" if trade_dir == regime else "CT"
 
     hist_series = macd_hist.iloc[-52:-1].dropna().tolist()
     if len(hist_series) < 50:
@@ -128,7 +139,7 @@ async def check_1h_entry(exchange, symbol, regime_4h):
         req_persist = persistence >= 3
         last_3_deltas = hist_deltas[-3:]
         req_explosive = any(d >= np.percentile(hist_deltas, 90) for d in last_3_deltas) and (np.mean(last_3_deltas) >= np.percentile(hist_deltas, 70))
-        
+
         req_structure = price > ema50.iloc[curr] if trade_dir == "LONG" else price < ema50.iloc[curr]
         req_confirm = is_breakout
         req_volume = vol_pct >= 70.0
@@ -154,7 +165,7 @@ async def check_1h_entry(exchange, symbol, regime_4h):
         "vol_pct": vol_pct,
         "body_ratio": body_ratio,
         "path": path,
-        "regime_4h": regime_4h,
+        "regime_4h": regime,
         "trade_dir": trade_dir,
         "is_breakout": is_breakout
     }
@@ -165,6 +176,7 @@ async def check_1h_entry(exchange, symbol, regime_4h):
         "path": path,
         "price": price,
         "atr": atr.iloc[curr],
+        "entry_tf": entry_tf,
         "indicator_data": indicator_data,
     }
 
@@ -267,8 +279,8 @@ def format_score_display(score_data, btc_relative, path):
     )
 
 
-async def get_btc_pct_change(exchange):
-    df = await fetch_ohlcv(exchange, "BTC/USDT", "1h", limit=10)
+async def get_btc_pct_change(exchange, entry_tf="1h"):
+    df = await fetch_ohlcv(exchange, "BTC/USDT", entry_tf, limit=10)
     if df is None or len(df) < 6:
         return 0.0
     close = df['close']
@@ -277,12 +289,21 @@ async def get_btc_pct_change(exchange):
     return (close.iloc[curr] - close.iloc[base_idx]) / close.iloc[base_idx]
 
 
-async def scan_market():
-    logger.info("Starting 1H/4H swing scan (Hybrid)...")
+async def scan_market(entry_tf: str = None):
+    """Run a market scan using the given entry timeframe (or DEFAULT_TIMEFRAME).
+    Automatically selects the paired trend timeframe via TIMEFRAME_PAIRINGS.
+    """
+    if entry_tf is None:
+        entry_tf = DEFAULT_TIMEFRAME
+
+    pairing = TIMEFRAME_PAIRINGS.get(entry_tf, TIMEFRAME_PAIRINGS[DEFAULT_TIMEFRAME])
+    trend_tf = pairing["trend"]
+
+    logger.info(f"Starting scan: entry={entry_tf} trend={trend_tf}")
     pairs_file = os.path.join(os.path.dirname(__file__), "pairs.txt")
     if not os.path.exists(pairs_file):
         logger.error("pairs.txt not found.")
-        return {"signals": [], "metadata": {"pairs_scanned": 0, "filtered_count": 0, "signals_found": 0}}
+        return {"signals": [], "metadata": {"pairs_scanned": 0, "filtered_count": 0, "signals_found": 0, "entry_tf": entry_tf}}
 
     with open(pairs_file, "r") as f:
         symbols = [line.strip() for line in f if line.strip()]
@@ -290,10 +311,10 @@ async def scan_market():
     exchange = ccxt.binance({'enableRateLimit': True})
 
     try:
-        btc_pct = await get_btc_pct_change(exchange)
-        logger.info(f"Analyzing {len(symbols)} pairs (4H Regime + 1H Entry)...")
+        btc_pct = await get_btc_pct_change(exchange, entry_tf)
+        logger.info(f"Analyzing {len(symbols)} pairs ({trend_tf} Regime + {entry_tf} Entry)...")
 
-        trend_tasks = [check_4h_trend(exchange, symbol) for symbol in symbols]
+        trend_tasks = [check_trend(exchange, symbol, trend_tf) for symbol in symbols]
         trend_results = await asyncio.gather(*trend_tasks)
 
         filtered_pairs = []
@@ -301,9 +322,9 @@ async def scan_market():
             if trend is not None:
                 filtered_pairs.append((symbol, trend))
 
-        logger.info(f"{len(filtered_pairs)} pairs passed 4H EMA 200 regime filter.")
+        logger.info(f"{len(filtered_pairs)} pairs passed {trend_tf} EMA 200 regime filter.")
 
-        entry_tasks = [check_1h_entry(exchange, sym, trend) for sym, trend in filtered_pairs]
+        entry_tasks = [_check_entry_impl(exchange, sym, trend, entry_tf) for sym, trend in filtered_pairs]
         entry_results = await asyncio.gather(*entry_tasks)
 
         signals = []
@@ -312,7 +333,7 @@ async def scan_market():
                 sym = filtered_pairs[i][0]
                 mc_rank = symbols.index(sym) if sym in symbols else i
 
-                coin_df = await fetch_ohlcv(exchange, sym, "1h", limit=10)
+                coin_df = await fetch_ohlcv(exchange, sym, entry_tf, limit=10)
                 if coin_df is not None and len(coin_df) >= 6:
                     close = coin_df['close']
                     coin_pct = (close.iloc[-2] - close.iloc[-6]) / close.iloc[-6]
@@ -325,14 +346,13 @@ async def scan_market():
 
                 indicator_data = res.pop("indicator_data", {})
                 score_data = compute_signal_score(indicator_data, btc_relative)
-                
+
                 res['score'] = score_data["composite"]
                 res['score_data'] = score_data
                 res['score_display'] = format_score_display(score_data, btc_relative, res['path'])
 
-                # Log the strict requirement formatting
                 logger.info(
-                    f"[{sym}] Path: {res['path']} | "
+                    f"[{sym}] TF: {entry_tf} | Path: {res['path']} | "
                     f"Hist_Delta_Pct: {indicator_data['delta_pct']:.1f} | "
                     f"Volume_Pct: {indicator_data['vol_pct']:.1f} | "
                     f"Total_Score: {res['score']}"
@@ -342,12 +362,14 @@ async def scan_market():
 
         signals.sort(key=lambda x: (-x['score'], x['mc_rank']))
 
-        logger.info(f"Scan complete. Found {len(signals)} matching signals.")
+        logger.info(f"Scan complete ({entry_tf}). Found {len(signals)} matching signals.")
 
         metadata = {
             "pairs_scanned": len(symbols),
             "filtered_count": len(filtered_pairs),
             "signals_found": len(signals),
+            "entry_tf": entry_tf,
+            "trend_tf": trend_tf,
         }
 
         return {"signals": signals[:10], "metadata": metadata}

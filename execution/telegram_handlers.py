@@ -10,6 +10,7 @@ import ccxt.async_support as ccxt
 from config import (
     MAX_POSITIONS, POSITION_SIZE_PCT, ATR_MULTIPLIER, TP1_RR_RATIO,
     DEFAULT_PORTFOLIO_BALANCE, fmt_price,
+    DEFAULT_TIMEFRAME, TIMEFRAME_PAIRINGS, parse_timeframe, VALID_TIMEFRAMES,
 )
 from state_manager import load_state, save_state, log_trade
 
@@ -36,8 +37,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state["chat_id"] = chat_id
     save_state(state)
 
-    register_jobs(context, chat_id)
-    await update.message.reply_text("🦈 Börsihai 2026 Swing Assistant is online. Monitoring 1H/4H strategy.")
+    entry_tf = state.get("timeframe", DEFAULT_TIMEFRAME)
+    pairing = TIMEFRAME_PAIRINGS.get(entry_tf, TIMEFRAME_PAIRINGS[DEFAULT_TIMEFRAME])
+    trend_tf = pairing["trend"]
+    register_jobs(context, chat_id, entry_tf)
+    await update.message.reply_text(
+        f"🦈 Börsihai 2026 Swing Assistant is online.\n"
+        f"Active timeframe: **{entry_tf.upper()}** (Trend filter: {trend_tf.upper()})"
+    )
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -126,8 +133,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     help_text = (
         "🦈 *Börsihai 2026 Swing Assistant*\n\n"
-        "I am a 1H/4H swing trading bot tracking Binance coins against USDT. "
-        "I use 4H EMA 200 for trend direction, 1H EMA 20/50 + MACD for entries, "
+        "I am a configurable timeframe swing trading bot tracking Binance coins against USDT. "
+        "I use EMA 200 on the trend timeframe for direction, EMA 20/50 + MACD on the entry timeframe for entries, "
         "and ATR-based dynamic risk management.\n\n"
         "**Notification Hierarchy:**\n"
         "🚨 ACTION REQUIRED — Entries and full closures\n"
@@ -138,6 +145,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/afk` - Pause signals, get safety SL (4%) and TP (10%) levels\n"
         "• `/ready` - Resume signal scanning\n"
         "• `/scan` - Run a market scan immediately\n"
+        "• `/timeframe <tf>` - Change scan timeframe (e.g. /timeframe 4h, /timeframe 1d)\n"
+        "• `/detail <coin>` - Show full alert details for a pending signal\n"
         "• `/restart` - Restart the bot service\n"
         "• `/start` - Re-register the monitoring loop\n"
         "• `/sl <coin> <price>` - Manually update SL for an open position\n"
@@ -172,15 +181,17 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🔍 Running market scan now, this may take ~30 seconds...")
 
-    scan_result = await scan_market()
+    scan_result = await scan_market(entry_tf=state.get("timeframe", DEFAULT_TIMEFRAME))
     signal_list = scan_result.get("signals", [])
     metadata = scan_result.get("metadata", {})
     pairs_scanned = metadata.get("pairs_scanned", 0)
+    active_tf = metadata.get("entry_tf", state.get("timeframe", DEFAULT_TIMEFRAME))
+    tf_label = f"[{active_tf.upper()}]"
     now_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
 
     if not signal_list:
         msg = (
-            f"✅ Manual scan complete ({now_str})\n"
+            f"✅ Manual scan complete {tf_label} ({now_str})\n"
             f"Pairs scanned: {pairs_scanned}\n"
             f"No signals found."
         )
@@ -239,7 +250,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         text = (
-            f"🚨 **ACTION REQUIRED: {path_label} {side} Signal** 🚨\n"
+            f"🚨 **ACTION REQUIRED {tf_label}: {path_label} {side} Signal** 🚨\n"
             f"Symbol: {symbol}\n"
             f"{score_display}\n"
             f"Entry Price: {fmt_price(price)}\n"
@@ -256,7 +267,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_state(state)
 
     # Send summary
-    summary = f"📋 **Manual Scan Summary** ({now_str})\n"
+    summary = f"📋 **Manual Scan Summary {tf_label}** ({now_str})\n"
     summary += f"Pairs scanned: {pairs_scanned}\n"
     summary += f"Alerts generated: {len(signal_list)} | Sent: {len(sent_pairs)} | Discarded: {len(discarded_pairs)}\n"
     if sent_pairs:
@@ -368,6 +379,58 @@ async def update_sl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state["active_positions"] = positions
     save_state(state)
     await update.message.reply_text(f"✅ Stop Loss for {symbol} updated to {fmt_price(new_sl)}.")
+
+
+async def timeframe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set the active scan timeframe. Usage: /timeframe <tf>
+    Examples: /timeframe 1h  /timeframe 4h  /timeframe 1d  /timeframe 15m"""
+    from bot import register_jobs
+    args = context.args
+
+    if not args:
+        state = load_state()
+        entry_tf = state.get("timeframe", DEFAULT_TIMEFRAME)
+        pairing = TIMEFRAME_PAIRINGS.get(entry_tf, TIMEFRAME_PAIRINGS[DEFAULT_TIMEFRAME])
+        trend_tf = pairing["trend"]
+        valid_list = ", ".join(sorted(VALID_TIMEFRAMES.keys()))
+        await update.message.reply_text(
+            f"⌛ Current timeframe: **{entry_tf.upper()}** (Trend: {trend_tf.upper()})\n\n"
+            f"Usage: /timeframe <value>\n"
+            f"Supported: {valid_list}\n"
+            f"Aliases: 1h, h, 1hour | 1d, d, daily | 15m, 15min, 15minutes ..."
+        )
+        return
+
+    raw = args[0]
+    tf = parse_timeframe(raw)
+    if tf is None:
+        valid_list = ", ".join(sorted(VALID_TIMEFRAMES.keys()))
+        await update.message.reply_text(
+            f"⚠️ Unsupported timeframe: **{raw}**\n"
+            f"Supported: {valid_list}\n"
+            f"Bot continues with current timeframe."
+        )
+        return
+
+    state = load_state()
+    state, _ = _ensure_chat_id(update, state)
+    old_tf = state.get("timeframe", DEFAULT_TIMEFRAME)
+    state["timeframe"] = tf
+    save_state(state)
+
+    pairing = TIMEFRAME_PAIRINGS.get(tf, TIMEFRAME_PAIRINGS[DEFAULT_TIMEFRAME])
+    trend_tf = pairing["trend"]
+    chat_id = state.get("chat_id", update.effective_chat.id)
+
+    # Re-register jobs with new scan interval
+    register_jobs(context, chat_id, tf)
+
+    await update.message.reply_text(
+        f"✅ Timeframe changed: **{old_tf.upper()}** → **{tf.upper()}**\n"
+        f"Trend filter: {trend_tf.upper()}\n"
+        f"Scan interval: every {pairing['scan_interval']} min\n"
+        f"Jobs re-registered. Next scan will use the new timeframe."
+    )
 
 
 async def clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
