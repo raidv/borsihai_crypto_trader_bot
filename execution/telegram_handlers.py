@@ -205,28 +205,31 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_positions = state.get("active_positions", [])
     open_positions_set = {f"{p['symbol']}_{p.get('side', 'LONG')}" for p in active_positions}
 
-    sent_pairs = []
-    discarded_pairs = []
+    existing_pending = state.get("pending_signals", {})
+    new_pending = {}
     new_sent = dict(sent_signals)
+    summary_lines = []
+    discarded_pairs = []
 
     for sig in signal_list:
         symbol = sig['symbol']
         side = sig['signal']
         score = sig.get('score', 0)
-        score_display = sig.get('score_display', f"Score: {score}/100")
-
-        if f"{symbol}_{side}" in open_positions_set:
-            discarded_pairs.append(f"{symbol} ({side}) — {score}/100 [open pos]")
-            continue
         price = sig['price']
         atr_val = sig.get('atr', 0)
-
+        path = sig.get('path', 'TA')
+        entry_tf_sig = sig.get('entry_tf', state.get("timeframe", DEFAULT_TIMEFRAME))
         sig_key = f"{symbol}_{side}"
+        base_coin = symbol.split('/')[0]
+
+        if sig_key in open_positions_set:
+            summary_lines.append(f"  📌 {base_coin} ({side}) — {score}/100 (POSITION OPEN)")
+            continue
+
         if sig_key in sent_signals:
             discarded_pairs.append(f"{symbol} ({side}) — {score}/100 [already sent]")
             continue
 
-        # Calculate preview levels
         initial_risk = ATR_MULTIPLIER * atr_val if atr_val > 0 else price * 0.04
         if side == "LONG":
             preview_sl = price - initial_risk
@@ -237,43 +240,44 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         balance = state.get("portfolio_balance", DEFAULT_PORTFOLIO_BALANCE)
         order_size_usd = balance * POSITION_SIZE_PCT
-        coin_qty = math.floor(order_size_usd / price) if price > 0 else 0
 
-        path = sig.get('path', 'TA')
-        path_label = "[TREND]" if path == "TA" else "[COUNTERTREND]"
+        new_pending[base_coin.upper()] = {
+            "symbol": symbol,
+            "side": side,
+            "path": path,
+            "score": score,
+            "score_display": sig.get('score_display', f"Score: {score}/100"),
+            "price": price,
+            "atr_val": atr_val,
+            "preview_sl": preview_sl,
+            "preview_tp1": preview_tp1,
+            "order_size_usd": order_size_usd,
+            "entry_tf": entry_tf_sig,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        keyboard = [
-            [InlineKeyboardButton("✅ Opened", callback_data=f"open_{side}_{symbol}_{atr_val:.4f}_{path}"),
-             InlineKeyboardButton("❌ Ignore", callback_data=f"ignore_{symbol}_{side}")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        text = (
-            f"🚨 **ACTION REQUIRED {tf_label}: {path_label} {side} Signal** 🚨\n"
-            f"Symbol: {symbol}\n"
-            f"{score_display}\n"
-            f"Entry Price: {fmt_price(price)}\n"
-            f"Stop Loss: {fmt_price(preview_sl)}\n"
-            f"TP1 (1.5R): {fmt_price(preview_tp1)}\n"
-            f"Order Size: ${order_size_usd:.2f} ({coin_qty} coins)"
-        )
-        await update.message.reply_text(text, reply_markup=reply_markup)
+        path_label = "[TREND]" if path == "TA" else "[CT]"
+        summary_lines.append(f"  🔔 {base_coin} ({side}) {path_label} — {score}/100  →  /detail {base_coin.lower()}")
         new_sent[sig_key] = datetime.now(timezone.utc).isoformat()
-        sent_pairs.append(f"{symbol} ({side}) — {score}/100")
 
-    # Persist updated sent_signals
+    # Carry forward pending signals not superseded
+    for coin, data in existing_pending.items():
+        if coin not in new_pending:
+            new_pending[coin] = data
+
     state["sent_signals"] = new_sent
+    state["pending_signals"] = new_pending
     save_state(state)
 
-    # Send summary
+    # Send summary only
+    num_new = len(summary_lines) - sum(1 for l in summary_lines if "POSITION OPEN" in l)
     summary = f"📋 **Manual Scan Summary {tf_label}** ({now_str})\n"
-    summary += f"Pairs scanned: {pairs_scanned}\n"
-    summary += f"Alerts generated: {len(signal_list)} | Sent: {len(sent_pairs)} | Discarded: {len(discarded_pairs)}\n"
-    if sent_pairs:
-        summary += "\n**Sent:**\n" + "\n".join(f"  • {p}" for p in sent_pairs)
+    summary += f"Pairs scanned: {pairs_scanned} | New: {num_new} | Skipped: {len(discarded_pairs)}\n"
+    if summary_lines:
+        summary += "\n**Alerts** (use /detail <coin> for full details):\n"
+        summary += "\n".join(summary_lines)
     if discarded_pairs:
-        summary += "\n**Discarded:**\n" + "\n".join(f"  • {p}" for p in discarded_pairs)
+        summary += "\n**Skipped:** " + ", ".join(discarded_pairs)
     if newly_registered:
         summary += "\n\nℹ️ Chat ID registered. Send /start to activate monitoring jobs."
     await update.message.reply_text(summary)
@@ -433,8 +437,84 @@ async def timeframe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show full alert details for a pending signal. Usage: /detail <coin>
+    Example: /detail SOL  or  /detail sol  (case-insensitive)
+    """
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: /detail <coin>\nExample: /detail SOL\n\nUse /scan to see available signals."
+        )
+        return
+
+    coin = args[0].strip().upper()
+    # Strip /USDT suffix if user typed full symbol
+    coin = coin.replace("/USDT", "").replace("USDT", "")
+
+    state = load_state()
+    pending = state.get("pending_signals", {})
+
+    if not pending:
+        await update.message.reply_text(
+            "ℹ️ No pending signals in memory.\nRun /scan to generate fresh signals."
+        )
+        return
+
+    # Case-insensitive lookup
+    sig_data = None
+    matched_coin = None
+    for key in pending:
+        if key.upper() == coin:
+            sig_data = pending[key]
+            matched_coin = key
+            break
+
+    if sig_data is None:
+        available = ", ".join(sorted(pending.keys()))
+        await update.message.reply_text(
+            f"❌ No pending alert for **{coin}**.\n"
+            f"Available: {available or 'none'}\n"
+            f"Use /scan to refresh signals."
+        )
+        return
+
+    symbol = sig_data["symbol"]
+    side = sig_data["side"]
+    path = sig_data.get("path", "TA")
+    score = sig_data.get("score", 0)
+    score_display = sig_data.get("score_display", f"Score: {score}/100")
+    price = sig_data["price"]
+    atr_val = sig_data.get("atr_val", 0)
+    preview_sl = sig_data["preview_sl"]
+    preview_tp1 = sig_data["preview_tp1"]
+    order_size_usd = sig_data["order_size_usd"]
+    entry_tf = sig_data.get("entry_tf", state.get("timeframe", DEFAULT_TIMEFRAME))
+    tf_label = f"[{entry_tf.upper()}]"
+    path_label = "[TREND]" if path == "TA" else "[COUNTERTREND]"
+    coin_qty = math.floor(order_size_usd / price) if price > 0 else 0
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Opened", callback_data=f"open_{side}_{symbol}_{atr_val:.4f}_{path}"),
+         InlineKeyboardButton("❌ Ignore", callback_data=f"ignore_{symbol}_{side}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    text = (
+        f"🚨 **ACTION REQUIRED {tf_label}: {path_label} {side} Signal** 🚨\n"
+        f"Symbol: {symbol}\n"
+        f"{score_display}\n"
+        f"Entry Price: {fmt_price(price)}\n"
+        f"Stop Loss: {fmt_price(preview_sl)}\n"
+        f"TP1 (1.5R): {fmt_price(preview_tp1)}\n"
+        f"Order Size: ${order_size_usd:.2f} ({coin_qty} coins)"
+    )
+    await update.message.reply_text(text, reply_markup=reply_markup)
+
+
 async def clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear sent_signals from state.json."""
+
     state = load_state()
     sent_signals = state.get("sent_signals", {})
     count = len(sent_signals)

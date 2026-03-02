@@ -96,31 +96,40 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
     sent_signals = state.get("sent_signals", {})
     active_positions = state.get("active_positions", [])
     open_positions_set = {f"{p['symbol']}_{p.get('side', 'LONG')}" for p in active_positions}
+    open_symbols = {p['symbol'] for p in active_positions}
 
+    # Load existing pending signals, carry forward ones not yet acted on
+    existing_pending = state.get("pending_signals", {})
+    new_pending = {}
     new_sent = {}
-    sent_pairs = []
+    summary_lines = []
     discarded_pairs = []
+    sent_pairs = [] # Keep track of newly sent signals for summary
 
     for sig in signal_list:
         symbol = sig['symbol']
         side = sig['signal']
         score = sig.get('score', 0)
-        score_display = sig.get('score_display', f"Score: {score}/100")
-
-        if f"{symbol}_{side}" in open_positions_set:
-            logger.info(f"Skipping {symbol} ({side}): already have open position in this direction.")
-            discarded_pairs.append(f"{symbol} ({side}) — {score}/100 [open pos]")
-            continue
         price = sig['price']
         atr_val = sig.get('atr', 0)
+        path = sig.get('path', 'TA')
+        entry_tf_sig = sig.get('entry_tf', entry_tf)
 
         sig_key = f"{symbol}_{side}"
+        base_coin = symbol.split('/')[0]
+
+        # Check if a position is already open in this direction
+        if sig_key in open_positions_set:
+            logger.info(f"Skipping {symbol} ({side}): already have open position in this direction.")
+            summary_lines.append(f"  📌 {base_coin} ({side}) — {score}/100 (POSITION OPEN)")
+            continue
+
         if sig_key in sent_signals:
             logger.info(f"Skipping duplicate signal: {sig_key}")
             discarded_pairs.append(f"{symbol} ({side}) — {score}/100 [already sent]")
             continue
 
-        # Calculate preview levels
+        # Calculate preview levels for storage
         initial_risk = ATR_MULTIPLIER * atr_val if atr_val > 0 else price * 0.04
         if side == "LONG":
             preview_sl = price - initial_risk
@@ -131,48 +140,53 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
 
         balance = state.get("portfolio_balance", 25000.0)
         order_size_usd = balance * POSITION_SIZE_PCT
-        coin_qty = math.floor(order_size_usd / price) if price > 0 else 0
 
-        path = sig.get('path', 'TA')
-        path_label = "[TREND]" if path == "TA" else "[COUNTERTREND]"
+        # Store full signal data for /detail retrieval
+        new_pending[base_coin.upper()] = {
+            "symbol": symbol,
+            "side": side,
+            "path": path,
+            "score": score,
+            "score_display": sig.get('score_display', f"Score: {score}/100"),
+            "price": price,
+            "atr_val": atr_val,
+            "preview_sl": preview_sl,
+            "preview_tp1": preview_tp1,
+            "order_size_usd": order_size_usd,
+            "entry_tf": entry_tf_sig,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 
-        keyboard = [
-            [InlineKeyboardButton("✅ Opened", callback_data=f"open_{side}_{symbol}_{atr_val:.4f}_{path}"),
-             InlineKeyboardButton("❌ Ignore", callback_data=f"ignore_{symbol}_{side}")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        text = (
-            f"🚨 **ACTION REQUIRED {tf_label}: {path_label} {side} Signal** 🚨\n"
-            f"Symbol: {symbol}\n"
-            f"{score_display}\n"
-            f"Entry Price: {fmt_price(price)}\n"
-            f"Stop Loss: {fmt_price(preview_sl)}\n"
-            f"TP1 (1.5R): {fmt_price(preview_tp1)}\n"
-            f"Order Size: ${order_size_usd:.2f} ({coin_qty} coins)"
-        )
-        await context.bot.send_message(chat_id=context.job.chat_id, text=text, reply_markup=reply_markup)
-
+        path_label = "[TREND]" if path == "TA" else "[CT]"
+        summary_lines.append(f"  🔔 {base_coin} ({side}) {path_label} — {score}/100  →  /detail {base_coin.lower()}")
         new_sent[sig_key] = datetime.now(timezone.utc).isoformat()
         sent_pairs.append(f"{symbol} ({side}) — {score}/100")
 
-    # Keep only signals that are still active
+    # Keep only signals that are still active from previous scan
     active_sig_keys = {f"{s['symbol']}_{s['signal']}" for s in signal_list}
     for key in sent_signals:
         if key in active_sig_keys:
             new_sent[key] = sent_signals[key]
 
+    # Carry forward pending signals from previous scan that weren't superseded
+    for coin, data in existing_pending.items():
+        if coin not in new_pending:
+            new_pending[coin] = data
+
     state["sent_signals"] = new_sent
+    state["pending_signals"] = new_pending
     save_state(state)
 
-    # Send scan summary
+    # Send compact scan summary only
+    num_new = len(sent_pairs)
+    num_discarded = len(discarded_pairs)
     summary = f"📋 **Scan Summary {tf_label}** ({now.strftime('%H:%M UTC')})\n"
-    summary += f"Pairs scanned: {pairs_scanned}\n"
-    summary += f"Alerts generated: {len(signal_list)} | Sent: {len(sent_pairs)} | Discarded: {len(discarded_pairs)}\n"
-    if sent_pairs:
-        summary += "\n**Sent:**\n" + "\n".join(f"  • {p}" for p in sent_pairs)
+    summary += f"Pairs scanned: {pairs_scanned} | New: {num_new} | Skipped: {num_discarded}\n"
+    if summary_lines:
+        summary += "\n**Alerts** (use /detail <coin> for full details):\n"
+        summary += "\n".join(summary_lines)
     if discarded_pairs:
-        summary += "\n**Discarded:**\n" + "\n".join(f"  • {p}" for p in discarded_pairs)
+        summary += "\n**Skipped:** " + ", ".join(discarded_pairs)
     await context.bot.send_message(chat_id=context.job.chat_id, text=summary)
 
 
@@ -221,7 +235,7 @@ def main():
         except Exception:
             pass
 
-    from telegram_handlers import clean, close_position, manual_long, manual_short, update_sl, timeframe_command
+    from telegram_handlers import clean, close_position, manual_long, manual_short, update_sl, timeframe_command, detail_command
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
@@ -237,6 +251,7 @@ def main():
     application.add_handler(CommandHandler("short", manual_short))
     application.add_handler(CommandHandler("sl", update_sl))
     application.add_handler(CommandHandler("timeframe", timeframe_command))
+    application.add_handler(CommandHandler("detail", detail_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
     application.add_error_handler(error_handler)
