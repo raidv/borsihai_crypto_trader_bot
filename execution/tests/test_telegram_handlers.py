@@ -248,3 +248,29 @@ async def test_handle_sl_raised():
         assert pos["next_tp_price"] == 115.0 # unchanged by button handler
         mock_save.assert_called_once()
         query.edit_message_text.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_balance_command():
+    from telegram_handlers import balance_command
+    update = AsyncMock()
+    context = AsyncMock()
+    context.args = ["26000"]
+
+    state = {
+        "portfolio_balance": 25000.0,
+        "available_cash": 15000.0,
+        "tied_capital": 10000.0
+    }
+
+    with patch("telegram_handlers.load_state", return_value=state), \
+         patch("telegram_handlers.save_state") as mock_save:
+        await balance_command(update, context)
+
+    # Balance increases by 1000, so available cash also increases by 1000
+    assert state["portfolio_balance"] == 26000.0
+    assert state["available_cash"] == 16000.0
+    mock_save.assert_called_once()
+    
+    reply = update.message.reply_text.call_args[0][0]
+    assert "25000.0" in reply
+    assert "26000.0" in reply

@@ -98,8 +98,7 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
     open_positions_set = {f"{p['symbol']}_{p.get('side', 'LONG')}" for p in active_positions}
     open_symbols = {p['symbol'] for p in active_positions}
 
-    # Load existing pending signals, carry forward ones not yet acted on
-    existing_pending = state.get("pending_signals", {})
+    # Fresh pending signals (drops ones from previous scans automatically)
     new_pending = {}
     new_sent = {}
     summary_lines = []
@@ -168,11 +167,6 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
         if key in active_sig_keys:
             new_sent[key] = sent_signals[key]
 
-    # Carry forward pending signals from previous scan that weren't superseded
-    for coin, data in existing_pending.items():
-        if coin not in new_pending:
-            new_pending[coin] = data
-
     state["sent_signals"] = new_sent
     state["pending_signals"] = new_pending
     save_state(state)
@@ -208,7 +202,7 @@ def main():
             msg = (
                 f"🟢 **Börsihai Bot Started**\n"
                 f"Service initiated. Active timeframe: **{entry_tf.upper()}** (Trend: {trend_tf.upper()})\n"
-                f"Type /timeframe \u003cvalue\u003e to change (e.g. /timeframe 4h)"
+                f"Type /timeframe <value> to change (e.g. /timeframe 4h)"
             )
             await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
             logger.info(f"Started with TF={entry_tf}. Resumed jobs for chat_id {chat_id}")
@@ -235,7 +229,7 @@ def main():
         except Exception:
             pass
 
-    from telegram_handlers import clean, close_position, manual_long, manual_short, update_sl, timeframe_command, detail_command
+    from telegram_handlers import clean, close_position, manual_long, manual_short, update_sl, timeframe_command, detail_command, balance_command, summary_command
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
@@ -252,6 +246,8 @@ def main():
     application.add_handler(CommandHandler("sl", update_sl))
     application.add_handler(CommandHandler("timeframe", timeframe_command))
     application.add_handler(CommandHandler("detail", detail_command))
+    application.add_handler(CommandHandler("balance", balance_command))
+    application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
     application.add_error_handler(error_handler)

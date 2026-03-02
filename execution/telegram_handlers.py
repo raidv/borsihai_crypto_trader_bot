@@ -145,11 +145,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/afk` - Pause signals, get safety SL (4%) and TP (10%) levels\n"
         "• `/ready` - Resume signal scanning\n"
         "• `/scan` - Run a market scan immediately\n"
+        "• `/summary` - Morning brief: actionable positions and high-score alerts\n"
         "• `/timeframe <tf>` - Change scan timeframe (e.g. /timeframe 4h, /timeframe 1d)\n"
         "• `/detail <coin>` - Show full alert details for a pending signal\n"
         "• `/restart` - Restart the bot service\n"
         "• `/start` - Re-register the monitoring loop\n"
         "• `/sl <coin> <price>` - Manually update SL for an open position\n"
+        "• `/balance <amount>` - Set portfolio balance manually\n"
         "• `/long <coin>` - Manually open a LONG position\n"
         "• `/short <coin>` - Manually open a SHORT position\n"
         "• `/close <coin> [price]` - Manually close a position\n"
@@ -205,7 +207,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_positions = state.get("active_positions", [])
     open_positions_set = {f"{p['symbol']}_{p.get('side', 'LONG')}" for p in active_positions}
 
-    existing_pending = state.get("pending_signals", {})
+    # Fresh pending signals (drops ones from previous scans automatically)
     new_pending = {}
     new_sent = dict(sent_signals)
     summary_lines = []
@@ -259,11 +261,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         path_label = "[TREND]" if path == "TA" else "[CT]"
         summary_lines.append(f"  🔔 {base_coin} ({side}) {path_label} — {score}/100  →  /detail {base_coin.lower()}")
         new_sent[sig_key] = datetime.now(timezone.utc).isoformat()
-
-    # Carry forward pending signals not superseded
-    for coin, data in existing_pending.items():
-        if coin not in new_pending:
-            new_pending[coin] = data
 
     state["sent_signals"] = new_sent
     state["pending_signals"] = new_pending
@@ -513,14 +510,158 @@ async def detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Clear sent_signals from state.json."""
-
+    """Clear sent_signals and pending_signals from state.json."""
     state = load_state()
     sent_signals = state.get("sent_signals", {})
-    count = len(sent_signals)
+    pending_signals = state.get("pending_signals", {})
+    count = len(sent_signals) + len(pending_signals)
     state["sent_signals"] = {}
+    state["pending_signals"] = {}
     save_state(state)
-    await update.message.reply_text(f"🧹 Cleaned up {count} un-interacted alerts. Future signals are now unblocked.")
+    await update.message.reply_text(f"🧹 Cleaned up {count} old alerts and pending signals. Future signals are now unblocked.")
+
+
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Update portfolio balance. Usage: /balance <amount>"""
+    args = context.args
+    if not args:
+        state = load_state()
+        bal = state.get("portfolio_balance", DEFAULT_PORTFOLIO_BALANCE)
+        await update.message.reply_text(f"Current recorded balance is: {fmt_price(bal)}\nUsage: /balance <amount>")
+        return
+
+    try:
+        new_balance = float(args[0].replace(",", ""))
+    except ValueError:
+        await update.message.reply_text("Invalid amount. Usage: /balance 25000.50")
+        return
+
+    state = load_state()
+    old_balance = state.get("portfolio_balance", DEFAULT_PORTFOLIO_BALANCE)
+    diff = new_balance - old_balance
+
+    state["portfolio_balance"] = new_balance
+    state["available_cash"] = state.get("available_cash", old_balance) + diff
+    save_state(state)
+
+    await update.message.reply_text(f"✅ Balance updated: {fmt_price(old_balance)} → {fmt_price(new_balance)}")
+
+
+async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate a morning brief of actionable items and high-score signals."""
+    import random
+    import ccxt.async_support as ccxt
+    
+    await update.message.reply_text("🔄 Compiling your summary, please wait...")
+
+    state = load_state()
+    pending = state.get("pending_signals", {})
+    active_positions = state.get("active_positions", [])
+    
+    # 1. High Score Pending Signals (>= 85)
+    high_score_signals = []
+    for coin, sig in pending.items():
+        if sig.get('score', 0) >= 85:
+            high_score_signals.append((coin, sig))
+            
+    # Send detailed alerts for high score signals first
+    for coin, sig in high_score_signals:
+        symbol = sig["symbol"]
+        side = sig["side"]
+        path = sig.get("path", "TA")
+        score = sig.get("score", 0)
+        score_display = sig.get("score_display", f"Score: {score}/100")
+        price = sig["price"]
+        atr_val = sig.get("atr_val", 0)
+        preview_sl = sig["preview_sl"]
+        preview_tp1 = sig["preview_tp1"]
+        order_size_usd = sig["order_size_usd"]
+        entry_tf = sig.get("entry_tf", state.get("timeframe", DEFAULT_TIMEFRAME))
+        tf_label = f"[{entry_tf.upper()}]"
+        path_label = "[TREND]" if path == "TA" else "[COUNTERTREND]"
+        coin_qty = math.floor(order_size_usd / price) if price > 0 else 0
+
+        keyboard = [
+            [InlineKeyboardButton("✅ Opened", callback_data=f"open_{side}_{symbol}_{atr_val:.4f}_{path}"),
+             InlineKeyboardButton("❌ Ignore", callback_data=f"ignore_{symbol}_{side}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        text = (
+            f"🌟 **HIGH SCORE ALERT {tf_label}: {path_label} {side} Signal** 🌟\n"
+            f"Symbol: {symbol}\n"
+            f"{score_display}\n"
+            f"Entry Price: {fmt_price(price)}\n"
+            f"Stop Loss: {fmt_price(preview_sl)}\n"
+            f"TP1 (1.5R): {fmt_price(preview_tp1)}\n"
+            f"Order Size: ${order_size_usd:.2f} ({coin_qty} coins)"
+        )
+        await update.message.reply_text(text, reply_markup=reply_markup)
+
+    # 2. Actionable Open Positions
+    actionable_lines = []
+    if active_positions:
+        exchange = ccxt.binance()
+        try:
+            symbols = list(set(p['symbol'] for p in active_positions))
+            tickers = await exchange.fetch_tickers(symbols)
+            
+            for p in active_positions:
+                symbol = p['symbol']
+                side = p.get('side', 'LONG')
+                ticker = tickers.get(symbol)
+                if not ticker:
+                    continue
+                current_price = ticker['last']
+                sl = p['current_sl']
+                tp1 = p.get('tp1_price', 0)
+                tp1_hit = p.get('tp1_hit', False)
+                
+                # Check SL breaches
+                if (side == "LONG" and current_price <= sl) or (side == "SHORT" and current_price >= sl):
+                    actionable_lines.append(f"⚠️ **{symbol}** SL {fmt_price(sl)} breached (Price: {fmt_price(current_price)}). Consider /close.")
+                    
+                # Check TP hits
+                if not tp1_hit and tp1 > 0:
+                    if (side == "LONG" and current_price >= tp1) or (side == "SHORT" and current_price <= tp1):
+                        actionable_lines.append(f"🎯 **{symbol}** TP1 {fmt_price(tp1)} hit! Consider half-close and raise SL.")
+                        
+                # Next TP check
+                next_tp = p.get('next_tp_price')
+                if tp1_hit and next_tp:
+                    if (side == "LONG" and current_price >= next_tp) or (side == "SHORT" and current_price <= next_tp):
+                        lvl = p.get('next_tp_level', 2)
+                        actionable_lines.append(f"🎯 **{symbol}** Next target TP{lvl} {fmt_price(next_tp)} reached! Consider raising SL.")
+        except Exception as e:
+            logger.error(f"Error fetching tickers for summary: {e}")
+            actionable_lines.append("❌ Could not fetch live prices for open positions.")
+        finally:
+            await exchange.close()
+
+    # 3. Compile Master Summary
+    total_pending = len(pending)
+    
+    if not high_score_signals and not actionable_lines and total_pending == 0:
+        all_clear_msgs = [
+            "All good in the neighbourhood, nothing to report! 🌴",
+            "Markets are quiet. Your portfolio is safe. Enjoy your coffee ☕",
+            "No high-score alerts, no breached stops. Smooth sailing captain! ⛵",
+            "Nothing doing today! Take a break from the charts. 🎮"
+        ]
+        msg = f"🌅 **Morning Brief**\n\n{random.choice(all_clear_msgs)}"
+    else:
+        msg = f"🌅 **Morning Brief**\n"
+        if high_score_signals:
+            msg += f"\n🌟 **Top Picks:** {len(high_score_signals)} A+ setups sent above."
+        msg += f"\n📊 **Total Pending Signals:** {total_pending} available in /scan"
+        
+        if actionable_lines:
+            msg += "\n\n🚨 **Actionable Positions:**\n" + "\n".join(actionable_lines)
+        else:
+            msg += "\n\n✅ All open positions are comfortably within limits."
+
+    await update.message.reply_text(msg)
+
 
 
 async def close_position(update: Update, context: ContextTypes.DEFAULT_TYPE):

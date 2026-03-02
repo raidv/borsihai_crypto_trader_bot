@@ -187,6 +187,10 @@ async def _check_position(context, p, tickers, candles_5m, macd_dfs):
             
             from config import TP_STEP_RR
             initial_risk = p.get('initial_risk', entry * 0.04)
+            
+            # Suggest raising SL to the previous TP level
+            target_sl = p.get('prev_tp_price', tp1)
+            
             p['prev_tp_price'] = next_tp
             if side == "LONG":
                 p['next_tp_price'] = next_tp + (initial_risk * TP_STEP_RR)
@@ -205,7 +209,7 @@ async def _check_position(context, p, tickers, candles_5m, macd_dfs):
                 text=(
                     f"🎯 **Next TP Level (TP{lvl}) Reached** for {symbol} at {fmt_price(next_tp)}!\n"
                     f"Current price: {fmt_price(current_price)}\n"
-                    f"Consider raising your Stop Loss to lock in profits."
+                    f"Raise your Stop Loss to {fmt_price(target_sl)} to lock in profits."
                 ),
                 reply_markup=reply_markup
             )
