@@ -98,24 +98,82 @@ async def test_close_position():
     context = AsyncMock()
     context.args = ["SOL"]
     state = {
+        "portfolio_balance": 25000.0,
+        "available_cash": 20000.0,
+        "tied_capital": 5000.0,
         "active_positions": [
-            {"symbol": "SOL/USDT", "side": "LONG"},
+            {
+                "symbol": "SOL/USDT",
+                "side": "LONG",
+                "entry_price": 100.0,
+                "allocated_capital": 5000.0,
+                "tp1_hit": False,
+            },
         ]
     }
     with patch("telegram_handlers.load_state", return_value=state),\
          patch("telegram_handlers.save_state") as mock_save,\
          patch("state_manager.log_trade") as mock_log,\
          patch("telegram_handlers.ccxt.binance") as mock_binance:
-        
+
         exchange = AsyncMock()
-        exchange.fetch_ticker.return_value = {"last": 150.0}
+        exchange.fetch_ticker.return_value = {"last": 110.0}  # 10% profit
         mock_binance.return_value = exchange
-        
+
         await close_position(update, context)
+
+        # Position removed
         assert len(state["active_positions"]) == 0
+        # Capital released (+PnL)
+        # net_pct = (110 - 100) / 100 * 100 - 0.2 = 9.8%
+        # pnl = 5000 * 0.098 = 490
+        assert abs(state["tied_capital"]) < 0.01  # should be 0
+        assert abs(state["available_cash"] - (20000.0 + 5000.0 + 490.0)) < 1.0
+        assert abs(state["portfolio_balance"] - (25000.0 + 490.0)) < 1.0
         mock_save.assert_called_once()
         mock_log.assert_called_once()
         update.message.reply_text.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_close_position_releases_capital_on_loss():
+    """Verify that a losing close still correctly reduces tied_capital."""
+    from telegram_handlers import close_position
+    update = AsyncMock()
+    context = AsyncMock()
+    context.args = ["SOL"]
+    state = {
+        "portfolio_balance": 25000.0,
+        "available_cash": 20000.0,
+        "tied_capital": 5000.0,
+        "active_positions": [
+            {
+                "symbol": "SOL/USDT",
+                "side": "LONG",
+                "entry_price": 100.0,
+                "allocated_capital": 5000.0,
+                "tp1_hit": False,
+            },
+        ]
+    }
+    with patch("telegram_handlers.load_state", return_value=state),\
+         patch("telegram_handlers.save_state"),\
+         patch("state_manager.log_trade"),\
+         patch("telegram_handlers.ccxt.binance") as mock_binance:
+
+        exchange = AsyncMock()
+        exchange.fetch_ticker.return_value = {"last": 95.0}  # 5% loss
+        mock_binance.return_value = exchange
+
+        await close_position(update, context)
+
+        assert len(state["active_positions"]) == 0
+        # net_pct = (95 - 100) / 100 * 100 - 0.2 = -5.2%
+        # pnl = 5000 * -0.052 = -260
+        assert abs(state["tied_capital"]) < 0.01
+        assert state["portfolio_balance"] < 25000.0  # balance decreased
+        assert state["available_cash"] > 20000.0  # cash restored (minus loss)
+
 
 @pytest.mark.asyncio
 async def test_manual_long():

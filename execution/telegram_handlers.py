@@ -428,13 +428,39 @@ async def close_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await exchange.close()
             
     from state_manager import log_trade
-    log_trade("CLOSE", target_pos["symbol"], target_pos["side"], price, 0.0, datetime.now(timezone.utc).timestamp())
-    
+    from config import DEFAULT_PORTFOLIO_BALANCE, POSITION_SIZE_PCT
+
+    # ── Release capital back to portfolio ──
+    alloc = target_pos.get("allocated_capital", state.get("portfolio_balance", DEFAULT_PORTFOLIO_BALANCE) * POSITION_SIZE_PCT)
+    entry = target_pos["entry_price"]
+    pos_side = target_pos.get("side", "LONG")
+    tp1_hit = target_pos.get("tp1_hit", False)
+
+    # If TP1 was already hit, only 50% of the original allocation is still running
+    running_alloc = alloc if not tp1_hit else alloc  # allocated_capital already halved at TP1 hit
+
+    if pos_side == "LONG":
+        net_pct = (price - entry) / entry * 100 - 0.2  # 0.2% for spread/fees
+    else:
+        net_pct = (entry - price) / entry * 100 - 0.2
+
+    pnl = running_alloc * (net_pct / 100)
+
+    state["portfolio_balance"] = state.get("portfolio_balance", DEFAULT_PORTFOLIO_BALANCE) + pnl
+    state["available_cash"] = state.get("available_cash", DEFAULT_PORTFOLIO_BALANCE) + running_alloc + pnl
+    state["tied_capital"] = max(0.0, state.get("tied_capital", 0.0) - running_alloc)
+
+    log_trade("CLOSE", target_pos["symbol"], pos_side, entry, price, datetime.now(timezone.utc).timestamp(), pnl)
+
     del positions[target_idx]
     state["active_positions"] = positions
     save_state(state)
-    
-    await update.message.reply_text(f"✅ Closed {target_pos['side']} on {target_pos['symbol']} at {fmt_price(price)}.")
+
+    pnl_sign = "+" if pnl >= 0 else ""
+    await update.message.reply_text(
+        f"✅ Closed {pos_side} on {target_pos['symbol']} at {fmt_price(price)}.\n"
+        f"P&L: {pnl_sign}${pnl:.2f} | New balance: ${state['portfolio_balance']:.2f}"
+    )
 
 
 async def _manual_position(update: Update, context: ContextTypes.DEFAULT_TYPE, side: str):
