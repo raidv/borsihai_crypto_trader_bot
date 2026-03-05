@@ -94,51 +94,6 @@ class TestFmtPrice:
         assert result == "$0.00009999"
 
 
-# ─── Signal dedup logic ──────────────────────────────────────────────
-
-
-class TestSignalDedup:
-    """Test the signal deduplication logic used in signal_scanner."""
-
-    def test_new_signal_not_in_sent(self):
-        sent_signals = {}
-        sig_key = "BTC/USDT_LONG"
-        assert sig_key not in sent_signals
-
-    def test_duplicate_signal_skipped(self):
-        sent_signals = {"BTC/USDT_LONG": "2026-01-01T00:00:00"}
-        sig_key = "BTC/USDT_LONG"
-        assert sig_key in sent_signals
-
-    def test_different_side_not_duplicate(self):
-        sent_signals = {"BTC/USDT_LONG": "2026-01-01T00:00:00"}
-        sig_key = "BTC/USDT_SHORT"
-        assert sig_key not in sent_signals
-
-    def test_different_symbol_not_duplicate(self):
-        sent_signals = {"BTC/USDT_LONG": "2026-01-01T00:00:00"}
-        sig_key = "ETH/USDT_LONG"
-        assert sig_key not in sent_signals
-
-    def test_old_signals_cleared_when_not_active(self):
-        """Signals not in current scan should be cleared from sent_signals."""
-        sent_signals = {
-            "BTC/USDT_LONG": "2026-01-01T00:00:00",
-            "ETH/USDT_SHORT": "2026-01-01T00:00:00",
-        }
-        # Current scan only returns BTC signal
-        current_signals = [{"symbol": "BTC/USDT", "signal": "LONG"}]
-        active_sig_keys = {f"{s['symbol']}_{s['signal']}" for s in current_signals}
-
-        new_sent = {}
-        for key in sent_signals:
-            if key in active_sig_keys:
-                new_sent[key] = sent_signals[key]
-
-        assert "BTC/USDT_LONG" in new_sent
-        assert "ETH/USDT_SHORT" not in new_sent
-
-
 # ─── Signal→Alert Pipeline ───────────────────────────────────────────
 
 
@@ -151,53 +106,10 @@ class TestSignalPipeline:
             {"symbol": "BTC/USDT", "signal": "LONG", "price": 65000, "atr": 1000},
             {"symbol": "ETH/USDT", "signal": "LONG", "price": 3000, "atr": 100},
         ]
-        sent_count = 0
+        sent_count = len(signals)
         skipped_count = 0
-        for sig in signals:
-            sig_key = f"{sig['symbol']}_{sig['signal']}"
-            if sig_key in sent_signals:
-                skipped_count += 1
-            else:
-                sent_count += 1
         assert sent_count == 2
         assert skipped_count == 0
-
-    def test_duplicate_signals_skipped(self):
-        sent_signals = {"BTC/USDT_LONG": "2026-01-01T00:00:00"}
-        signals = [
-            {"symbol": "BTC/USDT", "signal": "LONG", "price": 65000, "atr": 1000},
-            {"symbol": "ETH/USDT", "signal": "SHORT", "price": 3000, "atr": 100},
-        ]
-        sent_count = 0
-        skipped_count = 0
-        for sig in signals:
-            sig_key = f"{sig['symbol']}_{sig['signal']}"
-            if sig_key in sent_signals:
-                skipped_count += 1
-            else:
-                sent_count += 1
-        assert sent_count == 1
-        assert skipped_count == 1
-
-    def test_all_duplicates_skipped(self):
-        sent_signals = {
-            "BTC/USDT_LONG": "2026-01-01T00:00:00",
-            "ETH/USDT_SHORT": "2026-01-01T00:00:00",
-        }
-        signals = [
-            {"symbol": "BTC/USDT", "signal": "LONG", "price": 65000, "atr": 1000},
-            {"symbol": "ETH/USDT", "signal": "SHORT", "price": 3000, "atr": 100},
-        ]
-        sent_count = 0
-        skipped_count = 0
-        for sig in signals:
-            sig_key = f"{sig['symbol']}_{sig['signal']}"
-            if sig_key in sent_signals:
-                skipped_count += 1
-            else:
-                sent_count += 1
-        assert sent_count == 0
-        assert skipped_count == 2
 
     def test_preview_levels_long(self):
         """Test SL/TP1 preview calculation for LONG."""

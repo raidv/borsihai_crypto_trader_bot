@@ -169,7 +169,8 @@ async def ready(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state, newly_registered = _ensure_chat_id(update, state)
     state["bot_status"] = "ready"
     save_state(state)
-    msg = "✅ Bot is Ready. Hunting for 1H/4H swing signals."
+    entry_tf = state.get("timeframe", DEFAULT_TIMEFRAME)
+    msg = f"✅ Bot is Ready. Hunting for {entry_tf.upper()} swing signals."
     if newly_registered:
         msg += "\n\nℹ️ Chat ID registered. Send /start to activate monitoring jobs."
     await update.message.reply_text(msg)
@@ -226,10 +227,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if sig_key in open_positions_set:
             summary_lines.append(f"  📌 {base_coin} ({side}) — {score}/100 (POSITION OPEN)")
-            continue
-
-        if sig_key in sent_signals:
-            discarded_pairs.append(f"{symbol} ({side}) — {score}/100 [already sent]")
             continue
 
         initial_risk = ATR_MULTIPLIER * atr_val if atr_val > 0 else price * 0.04
@@ -814,7 +811,8 @@ async def _manual_position(update: Update, context: ContextTypes.DEFAULT_TYPE, s
             "tp1_price": tp1,
             "tp1_hit": False,
             "timestamp": datetime.now(timezone.utc).timestamp(),
-            "denial_count": 0
+            "denial_count": 0,
+            "entry_tf": state.get("timeframe", DEFAULT_TIMEFRAME)
         })
         state["active_positions"] = positions
         save_state(state)
@@ -890,7 +888,8 @@ async def _handle_open(query, data, state, exchange):
         "tp1_price": tp1,
         "tp1_hit": False,
         "timestamp": datetime.now(timezone.utc).timestamp(),
-        "denial_count": 0
+        "denial_count": 0,
+        "entry_tf": state.get("timeframe", DEFAULT_TIMEFRAME)
     })
     state["active_positions"] = positions
 

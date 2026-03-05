@@ -23,7 +23,8 @@ async def test_handle_open_clears_sent_signal():
         "sent_signals": {
             "BTC/USDT_LONG": "2026-01-01T00:00:00",
             "ETH/USDT_SHORT": "2026-01-01T00:00:00"
-        }
+        },
+        "timeframe": "4h"
     }
     
     exchange = AsyncMock()
@@ -35,6 +36,7 @@ async def test_handle_open_clears_sent_signal():
         # Verify the position was added
         assert len(state["active_positions"]) == 1
         assert state["active_positions"][0]["symbol"] == "BTC/USDT"
+        assert state["active_positions"][0]["entry_tf"] == "4h"
         
         # Verify the sent signal was cleared
         assert "BTC/USDT_LONG" not in state["sent_signals"]
@@ -184,7 +186,8 @@ async def test_manual_long():
     state = {
         "portfolio_balance": 1000.0,
         "available_cash": 1000.0,
-        "active_positions": []
+        "active_positions": [],
+        "timeframe": "1d"
     }
     
     with patch("telegram_handlers.load_state", return_value=state),\
@@ -202,6 +205,7 @@ async def test_manual_long():
         pos = state["active_positions"][0]
         assert pos["symbol"] == "SOL/USDT"
         assert pos["side"] == "LONG"
+        assert pos["entry_tf"] == "1d"
 
 @pytest.mark.asyncio
 async def test_update_sl():

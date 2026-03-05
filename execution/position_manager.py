@@ -33,7 +33,7 @@ async def position_monitor(context: ContextTypes.DEFAULT_TYPE):
     try:
         symbols = list(set(p['symbol'] for p in positions))
 
-        # Fetch 5m candles + 1H MACD in parallel
+        # Fetch 5m candles + MACD in parallel
         candle_results, macd_results = await _fetch_position_data(exchange, positions, symbols)
 
         candles_5m = {sym: c for sym, c in candle_results if c is not None}
@@ -74,22 +74,27 @@ async def _fetch_position_data(exchange, positions, symbols):
             logger.error(f"Error fetching 5m candle for {sym}: {e}")
             return sym, None
 
-    async def fetch_1h_macd(sym):
+    async def fetch_macd(sym, tf):
         try:
-            ohlcv = await exchange.fetch_ohlcv(sym, "1h", limit=50)
+            ohlcv = await exchange.fetch_ohlcv(sym, tf, limit=50)
             if ohlcv and len(ohlcv) >= 30:
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df.ta.macd(fast=12, slow=26, signal=9, append=True)
                 return sym, df
             return sym, None
         except Exception as e:
-            logger.error(f"Error fetching 1H MACD for {sym}: {e}")
+            logger.error(f"Error fetching {tf} MACD for {sym}: {e}")
             return sym, None
 
-    macd_symbols = list(set(p['symbol'] for p in positions if p.get('tp1_hit', False) or p.get('path', 'TA') == 'CT'))
+    macd_jobs = {}
+    for p in positions:
+        if p.get('tp1_hit', False) or p.get('path', 'TA') == 'CT':
+            sym = p['symbol']
+            tf = p.get('entry_tf', '1h')
+            macd_jobs[sym] = tf
 
     candle_tasks = [fetch_5m_candle(sym) for sym in symbols]
-    macd_tasks = [fetch_1h_macd(sym) for sym in macd_symbols]
+    macd_tasks = [fetch_macd(sym, tf) for sym, tf in macd_jobs.items()]
 
     all_results = await asyncio.gather(*candle_tasks, *macd_tasks)
 
@@ -273,10 +278,10 @@ async def _check_momentum_exit(context, p, current_price, df):
     if tp1_hit:
         if side == "LONG" and ml_prev >= ms_prev and ml_curr < ms_curr:
             macd_exit = True
-            reason = "MACD bearish cross on 1H"
+            reason = f"MACD bearish cross on {p.get('entry_tf', '1h').upper()}"
         elif side == "SHORT" and ml_prev <= ms_prev and ml_curr > ms_curr:
             macd_exit = True
-            reason = "MACD bullish cross on 1H"
+            reason = f"MACD bullish cross on {p.get('entry_tf', '1h').upper()}"
 
     if not macd_exit and path == "CT":
         if side == "LONG":

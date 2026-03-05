@@ -123,11 +123,6 @@ async def signal_scanner(context: ContextTypes.DEFAULT_TYPE):
             summary_lines.append(f"  📌 {base_coin} ({side}) — {score}/100 (POSITION OPEN)")
             continue
 
-        if sig_key in sent_signals:
-            logger.info(f"Skipping duplicate signal: {sig_key}")
-            discarded_pairs.append(f"{symbol} ({side}) — {score}/100 [already sent]")
-            continue
-
         # Calculate preview levels for storage
         initial_risk = ATR_MULTIPLIER * atr_val if atr_val > 0 else price * 0.04
         if side == "LONG":
